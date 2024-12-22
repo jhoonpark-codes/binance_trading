@@ -536,7 +536,7 @@ def main():
             )
 
         if st.button("Start High Frequency Trading", key='start_hft'):
-            st.warning("⚠️ 고빈도 거래는 매 위험할 수 있습니다. 신중���게 진행하세요!")
+            st.warning("⚠️ 고빈도 거래는 매 위험할 수 있습니다. 신중하게 진행하세요!")
             
             # 거래 실행
             with st.spinner('Trading in progress...'):
@@ -573,96 +573,149 @@ def main():
                     f"{(result['total_profit_usdt']/result['initial_balance'].get('USDT', 1))*100:.2f}%"
                 )
 
-    # Test Trade 탭 (새로 추가)
-    with tabs[6]:  # 7번째 탭
+    # Test Trade 탭
+    with tabs[6]:
         st.header("🧪 Test Trade")
         
-        # Bot Control 섹션
-        st.header("🤖 Bot Control")
+        # Scalping Strategy 섹션
+        st.header("📊 Scalping Strategy")
         col1, col2 = st.columns(2)
 
-        # 봇 인스턴스를 세션 상태로 관리
-        if 'bot' not in st.session_state:
-            st.session_state.bot = None
-
         with col1:
-            if st.button("Start Bot"):
-                if st.session_state.bot is None:
-                    try:
-                        st.session_state.bot = app.create_bot()
-                        result = st.session_state.bot.start()
-                        st.success(result)
-                    except Exception as e:
-                        st.error(f"Bot start error: {e}")
-                        if st.session_state.bot:
-                            app.stop_bot(st.session_state.bot)
-                        st.session_state.bot = None
-                else:
-                    st.warning("Bot is already running")
+            use_percentage = st.slider(
+                "USDT 사용 비율 (%)",
+                min_value=1,
+                max_value=100,
+                value=10,
+                step=1
+            )
+            
+            profit_target = st.number_input(
+                "목표 수익률 (%)",
+                min_value=0.01,
+                max_value=1.0,
+                value=0.01,
+                step=0.01,
+                format="%.2f"
+            )
 
         with col2:
-            if st.button("Stop Bot"):
-                if st.session_state.bot is not None:
-                    try:
-                        app.stop_bot(st.session_state.bot)
-                        st.session_state.bot = None
-                        st.success("Bot stopped successfully")
-                    except Exception as e:
-                        st.error(f"Bot stop error: {e}")
-                else:
-                    st.warning("Bot is not running")
+            max_trades = st.number_input(
+                "초당 최대 거래 횟수",
+                min_value=1,
+                max_value=5,
+                value=5
+            )
 
-        # 봇 상태 및 거래 정보 표시
-        if st.session_state.bot is not None:
-            st.info("Bot Status: Running")
-            
-            if hasattr(st.session_state.bot, 'trades') and st.session_state.bot.trades:
-                st.subheader("Recent Trades")
-                trades_df = pd.DataFrame(st.session_state.bot.trades[-5:])
-                st.dataframe(trades_df)
+        # 스캘핑 전략 시작/중지 버튼
+        col3, col4 = st.columns(2)
+
+        with col3:
+            if st.button("Start Scalping Strategy"):
+                st.warning("⚠️ 스캘핑 전략을 시작합니다.")
                 
-                total_profit = sum(trade.get('profit', 0) for trade in st.session_state.bot.trades)
-                st.metric("Total Profit", f"{total_profit:.4f} USDT")
-            else:
-                st.info("Bot Status: Stopped")
-
-        # Test Trade 섹션
-        st.header("🔬 Single Test Trade")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            test_symbol = st.selectbox(
-                "Test Trading Pair",
-                options=['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'DOGEUSDT'],
-                key='test_symbol'
-            )
-            
-            test_quantity = st.number_input(
-                "Test Quantity",
-                min_value=0.001,
-                value=0.001,
-                step=0.001,
-                format="%.3f"
-            )
-
-        if st.button("Execute Test Trade"):
-            st.warning("⚠️ 테스트넷에서 거래를 실행합니다.")
-            
-            with st.spinner('테스트 거래 실행 중...'):
                 try:
                     bot = HighFrequencyBot()
-                    result = bot.test_single_trade()
+                    st.session_state.scalping_bot = bot
+                    st.session_state.scalping_active = True
                     
-                    if result['success']:
-                        st.success(result['message'])
-                        if result.get('balance'):
-                            st.metric("BTC Balance", f"{result['balance'].get('BTC', 0):.8f}")
-                            st.metric("USDT Balance", f"{result['balance'].get('USDT', 0):.2f}")
-                    else:
-                        st.error(result['message'])
+                    # 잔고와 BTC 가격 표시 섹션
+                    st.subheader("💰 현재 잔고 및 BTC 가격")
+                    balance = bot.get_account_balance()
+                    
+                    if balance:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            usdt_metric = st.metric("USDT", f"{balance['USDT']:.2f}")
+                        with col2:
+                            btc_metric = st.metric("BTC", f"{balance['BTC']:.8f}")
+                        with col3:
+                            bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
+                            bnb_metric = st.metric("BNB", f"{bnb_balance:.4f}")
+                        with col4:
+                            # BTC 가격 메트릭 추가
+                            btc_price_metric = st.empty()
+                    
+                    # 진행 상태 표시
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0)
+                    
+                    # 거래 내역을 표시할 컨테이너
+                    trade_container = st.empty()
+                    
+                    # 스캘핑 전략 실행
+                    progress_count = 0
+                    last_price = 0
+                    
+                    while st.session_state.scalping_active:
+                        # 진행 상태 업데이트
+                        progress_count = (progress_count + 1) % 100
+                        progress_bar.progress(progress_count)
                         
+                        # 현재 BTC 가격 업데이트
+                        try:
+                            current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                            price_change = current_price - last_price if last_price != 0 else 0
+                            btc_price_metric.metric(
+                                "BTC 현재가",
+                                f"{current_price:,.2f} USDT",
+                                f"{price_change:+,.2f} USDT" if last_price != 0 else None,
+                                delta_color="normal" if price_change >= 0 else "inverse"
+                            )
+                            last_price = current_price
+                        except Exception as e:
+                            print(f"가격 조회 에러: {e}")
+                        
+                        result = bot.execute_scalping_strategy(
+                            use_percentage=use_percentage,
+                            profit_target=profit_target,
+                            max_trades=max_trades
+                        )
+                        
+                        if result['success']:
+                            # 거래 내역 업데이트
+                            if result.get('trades'):
+                                progress_text.empty()
+                                df_trades = pd.DataFrame(result['trades'])
+                                trade_container.dataframe(df_trades.style.format({
+                                    'buy_price': '{:.2f}',
+                                    'sell_price': '{:.2f}',
+                                    'quantity': '{:.8f}',
+                                    'profit': '{:.8f}',
+                                    'profit_percent': '{:.2f}%'
+                                }))
+                                
+                                # 잔고 업데이트
+                                new_balance = bot.get_account_balance()
+                                if new_balance:
+                                    col1.metric("USDT", f"{new_balance['USDT']:.2f}", 
+                                              f"{new_balance['USDT'] - balance['USDT']:.2f}")
+                                    col2.metric("BTC", f"{new_balance['BTC']:.8f}", 
+                                              f"{new_balance['BTC'] - balance['BTC']:.8f}")
+                            else:
+                                progress_text.info("💫 거래 조건 탐색 중... 거래 내역이 없습니다.")
+                        else:
+                            st.error(result['message'])
+                            break
+                        
+                        time.sleep(0.2)  # 초당 5회 업데이트
+                
                 except Exception as e:
-                    st.error(f"테스트 거래 에러: {e}")
+                    st.error(f"전략 실행 에러: {e}")
+                    st.session_state.scalping_active = False
+
+        with col4:
+            if st.button("Stop Scalping Strategy"):
+                if hasattr(st.session_state, 'scalping_bot') and st.session_state.get('scalping_active', False):
+                    try:
+                        st.session_state.scalping_bot.stop()
+                        st.session_state.scalping_active = False
+                        st.session_state.scalping_bot = None
+                        st.success("스캘핑 전략이 중지되었습니다.")
+                    except Exception as e:
+                        st.error(f"전략 중지 중 에러 발생: {e}")
+                else:
+                    st.warning("실행 중인 스캘핑 전략이 없습니다.")
 
     # Technical Analysis 탭
     with tabs[3]:
@@ -725,89 +778,6 @@ def main():
     # 수동 새로고침 버튼
     if st.button("새로고침"):
         st.rerun()
-
-    # Test Trade 탭 내에서
-    st.header("📊 Scalping Strategy")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        use_percentage = st.slider(
-            "USDT 사용 비율 (%)",
-            min_value=1,
-            max_value=100,
-            value=10,
-            step=1
-        )
-        
-        profit_target = st.number_input(
-            "목표 수익률 (%)",
-            min_value=0.01,
-            max_value=1.0,
-            value=0.01,
-            step=0.01,
-            format="%.2f"
-        )
-
-    with col2:
-        max_trades = st.number_input(
-            "초당 최대 거래 횟수",
-            min_value=1,
-            max_value=5,
-            value=5
-        )
-
-    # 스캘핑 전략 시작/중지 버튼
-    col3, col4 = st.columns(2)
-
-    with col3:
-        if st.button("Start Scalping Strategy"):
-            st.warning("⚠️ 스캘핑 전략을 시작합니다.")
-            
-            # 실시간 모니터링을 위한 컨테이너 생성
-            monitoring_container = st.container()
-            
-            with st.spinner('전략 실행 중...'):
-                try:
-                    bot = HighFrequencyBot()  # 새로운 봇 인스턴스 생성
-                    st.session_state.scalping_bot = bot
-                    st.session_state.scalping_active = True
-                    
-                    # 실시간 모니터링 시작
-                    col1, col2, col3 = monitoring_container.columns(3)
-                    balance_metric = col1.empty()
-                    btc_metric = col2.empty()
-                    profit_metric = col3.empty()
-                    trade_table = monitoring_container.empty()
-                    
-                    # 스캘핑 전략 실행
-                    result = bot.execute_scalping_strategy(
-                        use_percentage=use_percentage,
-                        profit_target=profit_target,
-                        max_trades=max_trades
-                    )
-                    
-                    if result['success']:
-                        st.success("전략 실행 완료!")
-                        st.write(result)
-                    else:
-                        st.error(result['message'])
-                        
-                except Exception as e:
-                    st.error(f"전략 실행 에러: {e}")
-                    st.session_state.scalping_active = False
-
-    with col4:
-        if st.button("Stop Scalping Strategy"):
-            if hasattr(st.session_state, 'scalping_bot') and st.session_state.get('scalping_active', False):
-                try:
-                    st.session_state.scalping_bot.stop()
-                    st.session_state.scalping_active = False
-                    st.session_state.scalping_bot = None
-                    st.success("스캘핑 전략이 중지되었습니다.")
-                except Exception as e:
-                    st.error(f"전략 중지 중 에러 발생: {e}")
-            else:
-                st.warning("실행 중인 스캘핑 전략이 없습니다.")
 
 if __name__ == "__main__":
     main() 
