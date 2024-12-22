@@ -32,19 +32,12 @@ class HighFrequencyBot:
         except Exception as e:
             print(f"시간 동기화 에러: {e}")
         
-        # 웹기화 추가
+        # 기본 변수 초기화
         self.price_history = []
         self.max_history_size = 100
         self.max_trades_per_second = 5
         self.last_trade_time = time.time()
         self.trade_counter = 0
-        
-        # 웹소켓 매니저 설정
-        self.twm = ThreadedWebsocketManager(
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            testnet=True
-        )
         
         self.symbol = 'BTCUSDT'
         self.trade_quantity = 0.001
@@ -53,27 +46,86 @@ class HighFrequencyBot:
         self.position = 0
         self.is_running = False
         self.thread = None
+        self.twm = None
+        self.current_price = None
         
+    def _init_websocket(self):
+        """WebSocket 초기화"""
+        try:
+            if hasattr(self, 'twm') and self.twm:
+                try:
+                    self.twm.stop()
+                    time.sleep(0.5)
+                except:
+                    pass
+                self.twm = None
+            
+            # 새로운 WebSocket 매니저 생성
+            self.twm = ThreadedWebsocketManager(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                testnet=True
+            )
+            return True
+        except Exception as e:
+            print(f"WebSocket 초기화 에러: {e}")
+            return False
+
     def start_websocket(self):
         """웹소켓 연결로 실시간 가격 데이터 수신"""
-        def handle_socket_message(msg):
-            try:
-                if msg.get('e') == 'trade':
-                    price = float(msg['p'])
-                    self.price_queue.put(price)
-                    self.update_price_history(price)
-            except Exception as e:
-                print(f"웹소켓 메시지 처리 에러: {e}")
-        
         try:
-            self.twm.start()
-            self.twm.start_trade_socket(
-                symbol=self.symbol,
-                callback=handle_socket_message
-            )
-        except Exception as e:
-            print(f"웹소켓 시작 에러: {e}")
+            # WebSocket 초기화
+            if not self._init_websocket():
+                return False
             
+            def handle_socket_message(msg):
+                if msg is None:
+                    return
+                try:
+                    if msg.get('e') == 'trade':
+                        price = float(msg['p'])
+                        self.price_queue.put(price)
+                        self.update_price_history(price)
+                except Exception as e:
+                    print(f"웹소켓 메시지 처리 에러: {e}")
+            
+            # 연결 시도 최대 3회
+            for attempt in range(3):
+                try:
+                    # WebSocket 시작
+                    self.twm.start()
+                    time.sleep(1)
+                    
+                    # 스트림 구독
+                    self.twm.start_trade_socket(
+                        symbol=self.symbol,
+                        callback=handle_socket_message
+                    )
+                    
+                    # 연결 확인
+                    time.sleep(2)
+                    if self.twm._running:
+                        print("WebSocket 연결 성공")
+                        return True
+                        
+                except Exception as e:
+                    print(f"연결 시도 {attempt + 1} 실패: {e}")
+                    try:
+                        self.twm.stop()
+                    except:
+                        pass
+                    time.sleep(2)
+                    
+                    if attempt < 2:  # 마지막 시도가 아니면 재초기화
+                        self._init_websocket()
+            
+            print("WebSocket 연결 실패")
+            return False
+            
+        except Exception as e:
+            print(f"WebSocket 시작 에러: {e}")
+            return False
+        
     def update_price_history(self, price):
         """가격 히스토리 업데이트"""
         self.price_history.append(price)
@@ -253,62 +305,66 @@ class HighFrequencyBot:
     def start(self):
         """봇 시작"""
         if not self.is_running:
-            self.is_running = True
-            self.thread = threading.Thread(target=self.run)
-            self.thread.start()
-            return "Bot started successfully"
+            try:
+                self.is_running = True
+                
+                # 가격 모니터링 스레드 시작
+                self.price_thread = threading.Thread(target=self.monitor_price_without_websocket)
+                self.price_thread.daemon = True
+                self.price_thread.start()
+                
+                # 메인 거래 스레드 시작
+                self.thread = threading.Thread(target=self.run)
+                self.thread.start()
+                
+                return "Bot started successfully"
+                
+            except Exception as e:
+                self.is_running = False
+                return f"Bot start error: {e}"
         return "Bot is already running"
     
     def stop(self):
         """봇 안전 종료"""
         if self.is_running:
+            print("봇 종료 시작...")
             try:
-                # 실행 플래그 설정
+                # 실행 플래그를 False로 설정
                 self.is_running = False
                 
-                # WebSocket 연결 종료
-                if hasattr(self, 'twm') and self.twm:
-                    try:
-                        self.twm.stop()
-                        self.twm = None
-                    except:
-                        pass
+                # 스레드 종료 대기
+                if hasattr(self, 'price_thread') and self.price_thread.is_alive():
+                    self.price_thread.join(timeout=2)
+                
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(timeout=2)
                 
                 # 열린 주문 취소
                 try:
                     open_orders = self.client.get_open_orders(symbol='BTCUSDT')
                     for order in open_orders:
-                        try:
-                            self.client.cancel_order(
-                                symbol='BTCUSDT',
-                                orderId=order['orderId']
-                            )
-                        except:
-                            continue
+                        self.client.cancel_order(
+                            symbol='BTCUSDT',
+                            orderId=order['orderId']
+                        )
                 except:
                     pass
                 
-                # 스레드 강제 종료
-                if self.thread and self.thread.is_alive():
-                    try:
-                        self.thread.join(timeout=1)  # 1초만 대기
-                        if self.thread.is_alive():
-                            # 여전히 살아있다면 강제 종료
-                            self._force_thread_stop()
-                    except:
-                        pass
-                
-                # 모든 리소스 정리
-                self.client = None
-                self.thread = None
-                self.price_queue = queue.Queue()
-                self.trades = []
-                
+                print("봇 종료 완료")
                 return "Bot stopped successfully"
                 
             except Exception as e:
                 print(f"Error during stop: {e}")
                 return "Bot stopped with errors"
+            finally:
+                self.is_running = False
+                self.thread = None
+                self.price_thread = None
+                self.price_queue = queue.Queue()
+                self.trades = []
+                self.current_price = None
+                self.price_history = []
+    
         return "Bot was not running"
         
     def _force_thread_stop(self):
@@ -334,7 +390,7 @@ class HighFrequencyBot:
         """메인 실행 루프"""
         self.start_websocket()
         
-        while self.is_running:  # is_running 플래그 확인
+        while self.is_running:  # is_running 플래그 인
             try:
                 # 스캘핑 전략 실행
                 result = self.execute_scalping_strategy(
@@ -403,11 +459,11 @@ class HighFrequencyBot:
             
             # 현재 잔고 확인
             balance = self.get_account_balance()
-            print(f"거래 전 잔고: {balance}")
+            print(f"거래  잔고: {balance}")
             
             try:
                 # 시장가 매수
-                buy_order = self.client.create_test_order(  # test_order로 변경
+                buy_order = self.client.create_test_order(  # test_order 변경
                     symbol='BTCUSDT',
                     side=Client.SIDE_BUY,
                     type=Client.ORDER_TYPE_MARKET,
@@ -466,7 +522,7 @@ class HighFrequencyBot:
                 current_price = float(self.client.get_symbol_ticker(symbol=symbol)['price'])
                 
                 # 여기에 하는 거래 로직 추가
-                # 예: 단�� 매수-매도 테스트
+                # 예: 단 매수-매도 테스트
                 try:
                     # 매수
                     buy_order = self.client.create_order(
@@ -505,61 +561,107 @@ class HighFrequencyBot:
             print(f"전략 테스트 에러: {e}")
             return None
 
-    def monitor_btc_price(self):
-        """실시간 BTC 가격 모니터링"""
-        def handle_socket_message(msg):
-            try:
-                if msg.get('e') == 'trade':
-                    price = float(msg['p'])
+    def monitor_price_without_websocket(self):
+        """REST API를 사용한 가격 모니터링"""
+        try:
+            while self.is_running:
+                try:
+                    ticker = self.client.get_symbol_ticker(symbol='BTCUSDT')
+                    price = float(ticker['price'])
                     self.current_price = price
-                    self.price_history.append({
-                        'timestamp': datetime.now(),
-                        'price': price
-                    })
-                    # 최근 1초간의 가격만 유지
-                    current_time = time.time()
-                    self.price_history = [p for p in self.price_history 
-                                        if (current_time - p['timestamp'].timestamp()) <= 1]
-            except Exception as e:
-                print(f"가격 모니터링 에러: {e}")
-
-        try:
-            self.current_price = float(self.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-            self.price_history = []
-            
-            # WebSocket 연결
-            self.twm.start()
-            self.twm.start_trade_socket(
-                symbol='BTCUSDT',
-                callback=handle_socket_message
-            )
-            print("BTC 가격 모니터링 시작")
+                    self.price_queue.put(price)
+                    self.update_price_history(price)
+                    time.sleep(0.2)  # 200ms 간격으로 가격 조회 (초당 5회)
+                except Exception as e:
+                    print(f"가격 조회 에러: {e}")
+                    time.sleep(1)
         except Exception as e:
-            print(f"가격 모니터링 시작 에러: {e}")
+            print(f"모니터링 에러: {e}")
 
-    def execute_scalping_strategy(self, use_percentage=10, profit_target=0.01, max_trades=5):
-        """개선된 스캘핑 전략"""
+    def buy_bnb_with_usdt(self, usdt_amount):
+        """USDT로 BNB 구매"""
         try:
-            # 가격 모니터링 시작
-            self.monitor_btc_price()
+            # BNB 현재가 확인
+            bnb_price = float(self.client.get_symbol_ticker(symbol='BNBUSDT')['price'])
+            
+            # 구매할 BNB 수량 계산 (소수점 2자리까지)
+            bnb_quantity = round(usdt_amount / bnb_price, 2)
+            
+            # BNB 매수 주문
+            order = self.client.create_order(
+                symbol='BNBUSDT',
+                side=Client.SIDE_BUY,
+                type=Client.ORDER_TYPE_MARKET,
+                quantity=bnb_quantity
+            )
+            
+            print(f"BNB 구매 완료: {bnb_quantity} BNB (약 {usdt_amount} USDT)")
+            return True
+            
+        except Exception as e:
+            print(f"BNB 구매 실패: {e}")
+            return False
+
+    def ensure_bnb_balance(self):
+        """충분한 BNB 잔고 확보"""
+        try:
+            balance = self.get_account_balance()
+            if not balance:
+                return False
+            
+            bnb_balance = balance.get('BNB', 0)
+            if bnb_balance < 0.01:  # BNB 잔고가 부족한 경우
+                usdt_balance = balance.get('USDT', 0)
+                if usdt_balance > 0:
+                    # USDT 잔고의 20%로 BNB 구매
+                    usdt_amount = usdt_balance * 0.2
+                    return self.buy_bnb_with_usdt(usdt_amount)
+                else:
+                    print("USDT 잔고 부족으로 BNB를 구매할 수 습니다")
+                    return False
+            return True
+            
+        except Exception as e:
+            print(f"BNB 잔고 확인 실패: {e}")
+            return False
+
+    def execute_scalping_strategy(self, use_percentage=10, profit_target=0.01, max_trades=None):
+        """초고빈도 스캘핑 전략"""
+        try:
+            if not hasattr(self, 'current_price'):
+                self.monitor_btc_price()
+                time.sleep(0.1)
+            
             trades = []
             trade_count = 0
+            fee_rate = 0.00075
+            min_interval = 0.1
             
-            while trade_count < max_trades and self.is_running:
+            while (max_trades is None or trade_count < max_trades) and self.is_running:
                 try:
-                    # 잔고 확인
                     balance = self.get_account_balance()
                     if not balance:
                         continue
                     
+                    # BNB 잔고 확인 및 필요시 구매
+                    if not self.ensure_bnb_balance():
+                        print("BNB 확보 실패. 1분 후 재시도...")
+                        time.sleep(60)
+                        continue
+                    
                     usdt_balance = balance['USDT']
                     trade_amount_usdt = (usdt_balance * use_percentage) / 100
+                    trade_amount_usdt = trade_amount_usdt * (1 - fee_rate)
                     
-                    # 현재 가격으로 수량 계산
-                    quantity = trade_amount_usdt / self.current_price
-                    quantity = round(quantity, 5)  # 소수점 5자리로 반올림
+                    # 현재 가격으로 수량 계산 및 형식 지정
+                    current_price = float(self.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                    quantity = trade_amount_usdt / current_price
                     
-                    if quantity < 0.00001:
+                    # Binance API 요구사항에 맞게 수량 형식화
+                    quantity = "{:.5f}".format(float(quantity))  # 문자열로 변환
+                    
+                    # 최소 거래 수량 확인
+                    if float(quantity) < 0.00001:
                         print("거래 수량이 너무 작습니다")
                         continue
                     
@@ -568,54 +670,60 @@ class HighFrequencyBot:
                         symbol='BTCUSDT',
                         side=Client.SIDE_BUY,
                         type=Client.ORDER_TYPE_MARKET,
-                        quantity=quantity
+                        quantity=quantity,
+                        newOrderRespType='FULL'
                     )
                     
                     buy_price = float(buy_order['fills'][0]['price'])
+                    buy_fee_bnb = float(buy_order['fills'][0]['commission'])
+                    
+                    # 목표가 계산 및 시 매도 주문
                     target_price = buy_price * (1 + profit_target/100)
                     
-                    print(f"매수: {buy_price} USDT, 목표가: {target_price} USDT")
+                    # 매도 주문 즉시 실행
+                    sell_order = self.client.create_order(
+                        symbol='BTCUSDT',
+                        side=Client.SIDE_SELL,
+                        type=Client.ORDER_TYPE_MARKET,
+                        quantity=quantity,
+                        newOrderRespType='FULL'
+                    )
                     
-                    # 목표가 도달 대기
-                    wait_start = time.time()
-                    while time.time() - wait_start < 60:  # 최대 1분 대기
-                        if self.current_price >= target_price:
-                            # 매도 주문
-                            sell_order = self.client.create_order(
-                                symbol='BTCUSDT',
-                                side=Client.SIDE_SELL,
-                                type=Client.ORDER_TYPE_MARKET,
-                                quantity=quantity
-                            )
-                            
-                            sell_price = float(sell_order['fills'][0]['price'])
-                            profit = (sell_price - buy_price) * quantity
-                            
-                            trades.append({
-                                'time': datetime.now(),
-                                'buy_price': buy_price,
-                                'sell_price': sell_price,
-                                'quantity': quantity,
-                                'profit': profit,
-                                'profit_percent': ((sell_price - buy_price) / buy_price) * 100
-                            })
-                            
-                            print(f"매도: {sell_price} USDT, 수익: {profit:.8f} USDT")
-                            break
-                        
-                        time.sleep(0.2)  # 0.2초마다 체크 (초당 5회)
+                    sell_price = float(sell_order['fills'][0]['price'])
+                    sell_fee_bnb = float(sell_order['fills'][0]['commission'])
+                    
+                    # 수익 계산
+                    real_profit = ((sell_price * (1 - fee_rate)) - (buy_price * (1 + fee_rate))) * quantity
+                    profit_percent = (sell_price - buy_price) / buy_price * 100
+                    
+                    trades.append({
+                        'time': datetime.now(),
+                        'buy_price': buy_price,
+                        'sell_price': sell_price,
+                        'quantity': quantity,
+                        'buy_fee_bnb': buy_fee_bnb,
+                        'sell_fee_bnb': sell_fee_bnb,
+                        'profit': real_profit,
+                        'profit_percent': profit_percent
+                    })
+                    
+                    print(f"거래 #{trade_count+1}")
+                    print(f"매수: {buy_price:.2f} -> 매도: {sell_price:.2f}")
+                    print(f"수익: {real_profit:.8f} USDT ({profit_percent:.2f}%)")
                     
                     trade_count += 1
+                    time.sleep(min_interval)  # API 제한 준수를 위한 최소 대기
                     
                 except Exception as e:
                     print(f"거래 실행 중 에러: {e}")
+                    time.sleep(0.5)  # 에러 발생 시 잠시 대기
                     continue
-                
-                time.sleep(0.2)  # 다음 거래까지 대기
             
             return {
                 'success': True,
                 'trades': trades,
+                'total_trades': trade_count,
+                'total_profit': sum(t['profit'] for t in trades),
                 'message': "전략 실행 완료"
             }
             
@@ -626,8 +734,8 @@ class HighFrequencyBot:
             }
 
     def __del__(self):
-        """소멸자에서도 안전하게 종료"""
-        if self.is_running:
+        """소멸자에서 즉시 종료"""
+        if hasattr(self, 'is_running') and self.is_running:
             self.stop()
 
 if __name__ == "__main__":

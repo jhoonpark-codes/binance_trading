@@ -118,7 +118,7 @@ class BinanceDashboard:
                 
             return pd.DataFrame(balances), total_value_usdt
         except Exception as e:
-            st.error(f"잔고 조회 ��러: {e}")
+            st.error(f"잔고 조회 에러: {e}")
             return None, 0
 
     def get_historical_data(self, symbol, interval='1d', limit=100):
@@ -225,7 +225,7 @@ class BinanceDashboard:
             # 초기 잔고 확인
             initial_balance = self.get_account_balance()
             if initial_balance is None:
-                return "잔고 조회 실패"
+                return "고 조회 실패"
             
             while trade_count < max_trades:
                 # 현재 가격 조회
@@ -536,7 +536,7 @@ def main():
             )
 
         if st.button("Start High Frequency Trading", key='start_hft'):
-            st.warning("⚠️ 고빈도 거래는 매�� 위험할 수 있습니다. 신중하게 진행하세요!")
+            st.warning("⚠️ 고빈도 거래는 매 위험할 수 있습니다. 신중���게 진행하세요!")
             
             # 거래 실행
             with st.spinner('Trading in progress...'):
@@ -664,106 +664,6 @@ def main():
                 except Exception as e:
                     st.error(f"테스트 거래 에러: {e}")
 
-        # Scalping Strategy 섹션
-        st.header("📊 Scalping Strategy Test")
-        col1, col2 = st.columns(2)
-
-        with col1:
-            use_percentage = st.slider(
-                "USDT 사용 비율 (%)",
-                min_value=1,
-                max_value=100,
-                value=10,
-                step=1
-            )
-            
-            profit_target = st.number_input(
-                "목표 수익률 (%)",
-                min_value=0.01,
-                max_value=1.0,
-                value=0.01,
-                step=0.01,
-                format="%.2f"
-            )
-
-        with col2:
-            max_trades = st.number_input(
-                "초당 최대 거래 횟수",
-                min_value=1,
-                max_value=5,
-                value=5
-            )
-
-        if st.button("Start Scalping Strategy"):
-            st.warning("⚠️ 스캘핑 전략을 시작합니다.")
-            
-            # 실시간 모니터링을 위한 컨테이너 생성
-            monitoring_container = st.container()
-            
-            with st.spinner('전략 실행 중...'):
-                try:
-                    bot = HighFrequencyBot()
-                    
-                    # 실시간 ��보 표시를 위한 컬럼 생성
-                    col1, col2, col3 = monitoring_container.columns(3)
-                    
-                    # 초기 잔고 표시
-                    balance_metric = col1.empty()
-                    btc_amount_metric = col2.empty()
-                    btc_price_metric = col3.empty()
-                    
-                    # 거래 기록을 위한 테이블
-                    trade_table = monitoring_container.empty()
-                    
-                    # 수익률 차트
-                    profit_chart = monitoring_container.empty()
-                    
-                    while True:
-                        # 잔고 업데이트
-                        balance = bot.get_account_balance()
-                        if balance:
-                            balance_metric.metric(
-                                "USDT 잔고",
-                                f"{balance['USDT']:.2f} USDT"
-                            )
-                            btc_amount_metric.metric(
-                                "BTC 보유량",
-                                f"{balance['BTC']:.8f} BTC"
-                            )
-                        
-                        # 현재 BTC 가격 업데이트
-                        current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                        btc_price_metric.metric(
-                            "BTC 현재가",
-                            f"{current_price:.2f} USDT"
-                        )
-                        
-                        # 거래 내역 업데이트
-                        if hasattr(bot, 'trades') and bot.trades:
-                            df_trades = pd.DataFrame(bot.trades[-5:])  # 최근 5개 거래만 표시
-                            trade_table.dataframe(df_trades.style.format({
-                                'buy_price': '{:.2f}',
-                                'sell_price': '{:.2f}',
-                                'quantity': '{:.8f}',
-                                'profit': '{:.8f}',
-                                'profit_percent': '{:.2f}%'
-                            }))
-                            
-                            # 수익률 차트 업데이트
-                            if len(bot.trades) > 0:
-                                profit_data = pd.DataFrame(bot.trades)
-                                fig = px.line(profit_data, 
-                                            x=profit_data.index, 
-                                            y='profit',
-                                            title='누적 수익 추이')
-                                profit_chart.plotly_chart(fig, use_container_width=True)
-                        
-                        # 0.2초마다 업데이트 (초당 5회)
-                        time.sleep(0.2)
-                        
-                except Exception as e:
-                    st.error(f"전략 실행 에러: {e}")
-
     # Technical Analysis 탭
     with tabs[3]:
         st.header("📊 Technical Analysis")
@@ -825,6 +725,89 @@ def main():
     # 수동 새로고침 버튼
     if st.button("새로고침"):
         st.rerun()
+
+    # Test Trade 탭 내에서
+    st.header("📊 Scalping Strategy")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        use_percentage = st.slider(
+            "USDT 사용 비율 (%)",
+            min_value=1,
+            max_value=100,
+            value=10,
+            step=1
+        )
+        
+        profit_target = st.number_input(
+            "목표 수익률 (%)",
+            min_value=0.01,
+            max_value=1.0,
+            value=0.01,
+            step=0.01,
+            format="%.2f"
+        )
+
+    with col2:
+        max_trades = st.number_input(
+            "초당 최대 거래 횟수",
+            min_value=1,
+            max_value=5,
+            value=5
+        )
+
+    # 스캘핑 전략 시작/중지 버튼
+    col3, col4 = st.columns(2)
+
+    with col3:
+        if st.button("Start Scalping Strategy"):
+            st.warning("⚠️ 스캘핑 전략을 시작합니다.")
+            
+            # 실시간 모니터링을 위한 컨테이너 생성
+            monitoring_container = st.container()
+            
+            with st.spinner('전략 실행 중...'):
+                try:
+                    bot = HighFrequencyBot()  # 새로운 봇 인스턴스 생성
+                    st.session_state.scalping_bot = bot
+                    st.session_state.scalping_active = True
+                    
+                    # 실시간 모니터링 시작
+                    col1, col2, col3 = monitoring_container.columns(3)
+                    balance_metric = col1.empty()
+                    btc_metric = col2.empty()
+                    profit_metric = col3.empty()
+                    trade_table = monitoring_container.empty()
+                    
+                    # 스캘핑 전략 실행
+                    result = bot.execute_scalping_strategy(
+                        use_percentage=use_percentage,
+                        profit_target=profit_target,
+                        max_trades=max_trades
+                    )
+                    
+                    if result['success']:
+                        st.success("전략 실행 완료!")
+                        st.write(result)
+                    else:
+                        st.error(result['message'])
+                        
+                except Exception as e:
+                    st.error(f"전략 실행 에러: {e}")
+                    st.session_state.scalping_active = False
+
+    with col4:
+        if st.button("Stop Scalping Strategy"):
+            if hasattr(st.session_state, 'scalping_bot') and st.session_state.get('scalping_active', False):
+                try:
+                    st.session_state.scalping_bot.stop()
+                    st.session_state.scalping_active = False
+                    st.session_state.scalping_bot = None
+                    st.success("스캘핑 전략이 중지되었습니다.")
+                except Exception as e:
+                    st.error(f"전략 중지 중 에러 발생: {e}")
+            else:
+                st.warning("실행 중인 스캘핑 전략이 없습니다.")
 
 if __name__ == "__main__":
     main() 
