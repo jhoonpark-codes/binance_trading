@@ -409,7 +409,7 @@ class HighFrequencyBot:
                     stop_loss=30,  # 30 USDT 이하 손실
                     max_trades=5,  # 당 최대 5회 거래
                     wait_minutes=3,  # 3분 대기
-                    profit_type="절대값(USDT)"  # 손익 설정 방식 ��택
+                    profit_type="절대값(USDT)"  # 손익 설정 방식 선택
                 )
                 
                 if result['success']:
@@ -669,7 +669,7 @@ class HighFrequencyBot:
                     # 1 BTC는 유지하 나머지 BTC만 사용
                     excess_btc = current_btc - 1.0
                     if excess_btc > 0:
-                        # 필요한 USDT ��산 (수수료 고려)
+                        # 필요한 USDT 계산 (수수료 고려)
                         needed_usdt = min_usdt - current_usdt
                         btc_to_sell = min(excess_btc, (needed_usdt / btc_price) * 1.01)  # 1% 마진 추가
                         
@@ -785,7 +785,7 @@ class HighFrequencyBot:
                 log_entry = (
                     f"시간: {trade_data['time']}\n"
                     f"매수가: {trade_data['buy_price']:.2f} USDT\n"
-                    f"매도가: {trade_data['sell_price']:.2f} USDT\n"
+                    f"매도���: {trade_data['sell_price']:.2f} USDT\n"
                     f"수량: {trade_data['quantity']:.8f} BTC\n"
                     f"손익: {trade_data['profit']:.2f} USDT\n"
                     f"수익률: {trade_data['profit_percent']:.2f}%\n"
@@ -948,12 +948,7 @@ class HighFrequencyBot:
             return False
 
     def check_order_status(self, order_id):
-        """WebSocket에서 주문 상태 확인"""
-        status = self.ws_data['order_status'].get(order_id)
-        if status:
-            return status
-            
-        # WebSocket 상태가 없는 경우에만 REST API 사용
+        """주문 상태 확인"""
         try:
             order = self.client.get_order(
                 symbol='BTCUSDT',
@@ -962,6 +957,9 @@ class HighFrequencyBot:
             time.sleep(0.1)  # API 호출 제한 방지
             return order['status']
         except Exception as e:
+            if "Order does not exist" in str(e):
+                # 주문이 없는 경우 None 반환
+                return None
             print(f"주문 상태 확인 에러: {e}")
             return None
 

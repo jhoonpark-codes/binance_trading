@@ -273,7 +273,7 @@ class BinanceDashboard:
                 stop_loss_price = buy_price * (1 - stop_loss_percent/100)
                 take_profit_price = buy_price * (1 + take_profit_percent/100)
                 
-                # 가��� 모니터링 및 매도 조건 확인
+                # 가격 모니터링 및 매도 조건 확인
                 while True:
                     current_price = self.monitor_price(symbol)
                     if current_price is None:
@@ -676,7 +676,7 @@ def main():
             
             # 손익 설정 방식 선택
             profit_type = st.radio(
-                "손익 설정 방식",
+                "손익 ��정 방식",
                 options=["절대값(USDT)", "퍼센트(%)"],
                 horizontal=True
             )
@@ -782,7 +782,7 @@ def main():
                         st.error("잔고 조회 실패")
                         return
                     
-                    # USDT 사용 금액 계�� (보유 USDT의 use_percentage%)
+                    # USDT 사용 금액 계산 (보유 USDT의 use_percentage%)
                     trade_amount_usdt = (initial_balance['USDT'] * use_percentage) / 100
                     
                     # 현재 BTC 가격 확인
@@ -981,89 +981,133 @@ def main():
                                 
                                 # 매도 주문 상태 확인
                                 if hasattr(st.session_state, 'sell_order_id'):
-                                    order_status = bot.check_order_status(st.session_state.sell_order_id)
-                                    if order_status == 'FILLED':
-                                        sell_status_display.success("✅ 매도 완료!")
+                                    try:
+                                        order_status = bot.check_order_status(st.session_state.sell_order_id)
+                                        if order_status == 'FILLED':
+                                            # 매도 완료 로그 추가
+                                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                            st.session_state.trade_logs.append({
+                                                '시간': timestamp,
+                                                '유형': '매도',
+                                                '가격': f"{st.session_state.target_price:,.3f}",
+                                                '수량': quantity,
+                                                'USDT 금액': f"{float(quantity) * st.session_state.target_price:,.3f}",
+                                                '상태': '체결완료'
+                                            })
+                                            sell_status_display.success("✅ 매도 완료!")
+                                            
+                                            # 1. BTC를 USDT로 변환 (0.5 BTC 지)
+                                            try:
+                                                new_balance = bot.get_account_balance()
+                                                if new_balance['BTC'] > 0.5:
+                                                    excess_btc = new_balance['BTC'] - 0.5
+                                                    if excess_btc > 0:
+                                                        convert_order = bot.client.create_order(
+                                                            symbol='BTCUSDT',
+                                                            side=Client.SIDE_SELL,
+                                                            type=Client.ORDER_TYPE_MARKET,
+                                                            quantity="{:.5f}".format(excess_btc)
+                                                        )
+                                                        st.info(f"BTC -> USDT 변환 완료: {excess_btc:.8f} BTC")
+                                                        time.sleep(1)  # 잔고 업데이트 대기
+                                            except Exception as e:
+                                                st.error(f"BTC 변환 실패: {e}")
+                                            
+                                            # 2. 새로운 매수-매도 주문 설정
+                                            try:
+                                                # 최신 잔고 확인
+                                                updated_balance = bot.get_account_balance()
+                                                trade_amount_usdt = (updated_balance['USDT'] * use_percentage) / 100
+                                                
+                                                # 현재 BTC 가격 확인
+                                                current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                                                
+                                                # 새로운 매수 수량 계산
+                                                new_quantity = (trade_amount_usdt / current_price) * 0.999
+                                                new_quantity = "{:.5f}".format(float(new_quantity))
+                                                
+                                                # 매수 주문
+                                                buy_order = bot.client.create_order(
+                                                    symbol='BTCUSDT',
+                                                    side=Client.SIDE_BUY,
+                                                    type=Client.ORDER_TYPE_MARKET,
+                                                    quantity=new_quantity
+                                                )
+                                                
+                                                # 매수가 업데이트
+                                                st.session_state.buy_price = float(buy_order['fills'][0]['price'])
+                                                buy_price_display.metric(
+                                                    "매수가",
+                                                    f"{st.session_state.buy_price:,.2f} USDT"
+                                                )
+                                                
+                                                # 새로운 목표가 계산
+                                                if profit_type == "절대값(USDT)":
+                                                    st.session_state.target_price = st.session_state.buy_price + profit_target
+                                                else:
+                                                    st.session_state.target_price = st.session_state.buy_price * (1 + profit_target/100)
+                                                
+                                                # 목표가 표시 업데이트
+                                                target_price_display.metric(
+                                                    "목표 매도가",
+                                                    f"{st.session_state.target_price:,.2f} USDT",
+                                                    f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
+                                                )
+                                                
+                                                # 새로운 매도 주문
+                                                sell_order = bot.client.create_order(
+                                                    symbol='BTCUSDT',
+                                                    side=Client.SIDE_SELL,
+                                                    type=Client.ORDER_TYPE_LIMIT,
+                                                    timeInForce='GTC',
+                                                    quantity=new_quantity,
+                                                    price="{:.2f}".format(st.session_state.target_price)
+                                                )
+                                                
+                                                # 새로운 매도 주문 ID 저장
+                                                st.session_state.sell_order_id = sell_order['orderId']
+                                                sell_status_display.info("📋 새로운 매도 주문 등록됨")
+                                                
+                                                # 새로운 매수 주문 시 로그 추가
+                                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                                st.session_state.trade_logs.append({
+                                                    '시간': timestamp,
+                                                    '유형': '매수',
+                                                    '가격': f"{st.session_state.buy_price:,.3f}",
+                                                    '수량': new_quantity,
+                                                    'USDT 금액': f"{float(new_quantity) * st.session_state.buy_price:,.3f}",
+                                                    '상태': '체결완료'
+                                                })
+                                                
+                                                # 새로운 매도 주문 등록 시 로그 추가
+                                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                                st.session_state.trade_logs.append({
+                                                    '시간': timestamp,
+                                                    '유형': '매도 예약',
+                                                    '가격': f"{st.session_state.target_price:,.3f}",
+                                                    '수량': new_quantity,
+                                                    'USDT 금액': f"{float(new_quantity) * st.session_state.target_price:,.3f}",
+                                                    '상태': '주문 등록'
+                                                })
+                                                
+                                            except Exception as e:
+                                                st.error(f"새로운 주문 설정 실패: {e}")
+                                                
+                                        elif order_status == 'NEW':
+                                            sell_status_display.info("📋 매도 주문 대기 중...")
+                                        elif order_status is None:
+                                            # 주문이 없는 경우 (이미 취소되었거나 완료된 경우)
+                                            st.session_state.sell_order_id = None
+                                        else:
+                                            sell_status_display.warning(f"⚠️ 주문 상태: {order_status}")
                                         
-                                        # 1. BTC를 USDT로 변환 (0.5 BTC 지)
-                                        try:
-                                            new_balance = bot.get_account_balance()
-                                            if new_balance['BTC'] > 0.5:
-                                                excess_btc = new_balance['BTC'] - 0.5
-                                                if excess_btc > 0:
-                                                    convert_order = bot.client.create_order(
-                                                        symbol='BTCUSDT',
-                                                        side=Client.SIDE_SELL,
-                                                        type=Client.ORDER_TYPE_MARKET,
-                                                        quantity="{:.5f}".format(excess_btc)
-                                                    )
-                                                    st.info(f"BTC -> USDT 변환 완료: {excess_btc:.8f} BTC")
-                                                    time.sleep(1)  # 잔고 업데이트 대기
-                                        except Exception as e:
-                                            st.error(f"BTC 변환 실패: {e}")
-                                        
-                                        # 2. 새로운 매수-매도 주문 설정
-                                        try:
-                                            # 최신 잔고 확인
-                                            updated_balance = bot.get_account_balance()
-                                            trade_amount_usdt = (updated_balance['USDT'] * use_percentage) / 100
-                                            
-                                            # 현재 BTC 가격 확인
-                                            current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                                            
-                                            # 새로운 매수 수량 계산
-                                            new_quantity = (trade_amount_usdt / current_price) * 0.999
-                                            new_quantity = "{:.5f}".format(float(new_quantity))
-                                            
-                                            # 매수 주문
-                                            buy_order = bot.client.create_order(
-                                                symbol='BTCUSDT',
-                                                side=Client.SIDE_BUY,
-                                                type=Client.ORDER_TYPE_MARKET,
-                                                quantity=new_quantity
-                                            )
-                                            
-                                            # 매수가 업데이트
-                                            st.session_state.buy_price = float(buy_order['fills'][0]['price'])
-                                            buy_price_display.metric(
-                                                "매수가",
-                                                f"{st.session_state.buy_price:,.2f} USDT"
-                                            )
-                                            
-                                            # 새로운 목표가 계산
-                                            if profit_type == "절대값(USDT)":
-                                                st.session_state.target_price = st.session_state.buy_price + profit_target
-                                            else:
-                                                st.session_state.target_price = st.session_state.buy_price * (1 + profit_target/100)
-                                            
-                                            # 목표가 표시 업데이트
-                                            target_price_display.metric(
-                                                "목표 매도가",
-                                                f"{st.session_state.target_price:,.2f} USDT",
-                                                f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
-                                            )
-                                            
-                                            # 새로운 매도 주문
-                                            sell_order = bot.client.create_order(
-                                                symbol='BTCUSDT',
-                                                side=Client.SIDE_SELL,
-                                                type=Client.ORDER_TYPE_LIMIT,
-                                                timeInForce='GTC',
-                                                quantity=new_quantity,
-                                                price="{:.2f}".format(st.session_state.target_price)
-                                            )
-                                            
-                                            # 새로운 매도 주문 ID 저장
-                                            st.session_state.sell_order_id = sell_order['orderId']
-                                            sell_status_display.info("📋 새로운 매도 주문 등록됨")
-                                            
-                                        except Exception as e:
-                                            st.error(f"새로운 주문 설정 실패: {e}")
-                                            
-                                    elif order_status == 'NEW':
-                                        sell_status_display.info("📋 매도 주문 대기 중...")
-                                    else:
-                                        sell_status_display.warning(f"⚠️ 주문 상태: {order_status}")
+                                    except Exception as e:
+                                        if "Order does not exist" in str(e):
+                                            # 주문이 없는 경우 처리
+                                            st.session_state.sell_order_id = None
+                                            sell_status_display.info("주문 정보 초기화됨")
+                                        else:
+                                            print(f"주문 상태 확인 중 에러: {e}")
                                 
                                 # 거래 로그 테이블 업데이트
                                 if st.session_state.trade_logs:
