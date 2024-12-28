@@ -437,13 +437,70 @@ def plot_portfolio_pie(balances_df):
     return fig
 
 def main():
+    # session_state 초기화
+    if 'trade_logs' not in st.session_state:
+        st.session_state.trade_logs = []
+    if 'scalping_active' not in st.session_state:
+        st.session_state.scalping_active = False
+    if 'buy_price' not in st.session_state:
+        st.session_state.buy_price = 0.0
+    if 'target_price' not in st.session_state:
+        st.session_state.target_price = 0.0
+
+    st.set_page_config(page_title="Binance Dashboard", layout="wide")
+    
+    # 페이지 전체 너비 설정을 위한 스타일 추가
+    st.markdown("""
+        <style>
+            .reportview-container .main .block-container {
+                max-width: 95%;
+                padding-left: 5%;
+                padding-right: 5%;
+            }
+            .element-container {
+                width: 100%;
+                max-width: 4000px;
+            }
+            .stMetric {
+                width: 100%;
+                min-width: 400px;
+            }
+            .stMetric-value {
+                white-space: nowrap;
+                overflow: visible;
+                font-size: 1.1rem !important;
+                padding: 0 20px;
+            }
+            .stMetric-label {
+                font-size: 1rem !important;
+                padding: 0 20px;
+            }
+            div[data-testid="metric-container"] {
+                width: fit-content;
+                min-width: 400px;
+                margin: 0 25px;
+            }
+            div[data-testid="column"] {
+                padding: 0 20px;
+            }
+            div[data-testid="stHorizontalBlock"] {
+                gap: 2rem;
+            }
+            .dataframe {
+                font-size: 0.9rem !important;
+            }
+            .dataframe td {
+                white-space: nowrap;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
     app = StreamlitApp()
     
     # 시작 세션 상 초기화
     if 'bot' not in st.session_state:
         st.session_state.bot = None
 
-    st.set_page_config(page_title="Binance Dashboard", layout="wide")
     st.title("Binance Trading Dashboard")
 
     dashboard = BinanceDashboard()
@@ -708,11 +765,15 @@ def main():
                 # session_state 초기화
                 if 'scalping_active' not in st.session_state:
                     st.session_state.scalping_active = False
+                if 'buy_price' not in st.session_state:
+                    st.session_state.buy_price = 0.0
+                if 'target_price' not in st.session_state:
+                    st.session_state.target_price = 0.0
                     
                 st.warning("⚠️ 스캘핑 전략을 시작합니다.")
                 try:
                     bot = HighFrequencyBot()
-                    st.session_state.scalping_active = True  # 상태 활성화
+                    st.session_state.scalping_active = True
                     st.session_state.scalping_bot = bot
                     
                     # 현재 잔고 확인
@@ -721,7 +782,7 @@ def main():
                         st.error("잔고 조회 실패")
                         return
                     
-                    # USDT 사용 금액 계산 (보유 USDT의 use_percentage%)
+                    # USDT 사용 금액 계�� (보유 USDT의 use_percentage%)
                     trade_amount_usdt = (initial_balance['USDT'] * use_percentage) / 100
                     
                     # 현재 BTC 가격 확인
@@ -733,70 +794,131 @@ def main():
                     
                     st.info(f"매수 예정: {quantity} BTC (약 {trade_amount_usdt:.2f} USDT)")
                     
-                    # UI 컴포넌트 설정 - 컬럼 크기 조정
+                    # UI 컴포넌트 설정 - 수직 레이아웃으로 변경
                     st.subheader("💰 현재 잔고 및 BTC 가격")
+
+                    # 스타일 수정
+                    st.markdown("""
+                        <style>
+                            .element-container {
+                                width: 100%;
+                                max-width: 600px;  # 너비 축소
+                            }
+                            .stMetric {
+                                width: 100%;
+                                min-width: 500px;  # 너비 조정
+                                margin-bottom: 10px;  # 메트릭 간 간격
+                            }
+                            .stMetric-value {
+                                white-space: nowrap;
+                                overflow: visible;
+                                font-size: 1.2rem !important;
+                                padding: 0 20px;
+                            }
+                            .stMetric-label {
+                                font-size: 1.1rem !important;
+                                padding: 0 20px;
+                            }
+                            div[data-testid="metric-container"] {
+                                width: 100%;
+                                margin: 10px 0;  # 상하 마진 추가
+                            }
+                        </style>
+                    """, unsafe_allow_html=True)
+
+                    # 메트릭 컴포넌트들을 수직으로 배치
                     metrics_container = st.container()
-                    # 컬럼 비율 조정
-                    col1, col2, col3, col4, col5, col6 = metrics_container.columns([1.2, 1.2, 1, 1.2, 1.2, 1.2])
+
+                    # USDT 잔고
+                    usdt_balance = metrics_container.empty()
+                    usdt_balance.metric(
+                        "USDT 잔고",
+                        f"{initial_balance['USDT']:,.3f}",
+                        label_visibility="visible"
+                    )
+
+                    # BTC 잔고
+                    btc_balance = metrics_container.empty()
+                    btc_balance.metric(
+                        "BTC 잔고",
+                        f"{initial_balance['BTC']:.8f}",
+                        label_visibility="visible"
+                    )
+
+                    # BNB 잔고
+                    bnb_balance_display = metrics_container.empty()
+                    bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
+                    bnb_balance_display.metric(
+                        "BNB 잔고",
+                        f"{bnb_balance:.4f}",
+                        label_visibility="visible"
+                    )
+
+                    # BTC 현재가
+                    btc_price = metrics_container.empty()
+                    current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                    btc_price.metric(
+                        "BTC 현재가",
+                        f"{current_price:,.3f}",
+                        label_visibility="visible"
+                    )
+
+                    # 매수가
+                    buy_price_display = metrics_container.empty()
+                    buy_price_display.metric(
+                        "매수가",
+                        "대기 중",
+                        label_visibility="visible"
+                    )
+
+                    # 목표 매도가
+                    target_price_display = metrics_container.empty()
+                    target_price_display.metric(
+                        "목표 매도가",
+                        "대기 중",
+                        label_visibility="visible"
+                    )
+                    sell_status_display = metrics_container.empty()
                     
-                    # 초기 잔고 표시 - 스타일 조정
-                    with col1:
-                        usdt_balance = st.empty()
-                        usdt_balance.metric(
-                            "USDT 잔고",
-                            f"{initial_balance['USDT']:,.2f}",  # 천단위 구분자 추가
-                            label_visibility="visible"
-                        )
-                    
-                    with col2:
-                        btc_balance = st.empty()
-                        btc_balance.metric(
-                            "BTC 잔고",
-                            f"{initial_balance['BTC']:.8f}",
-                            label_visibility="visible"
-                        )
-                    
-                    with col3:
-                        bnb_balance_display = st.empty()
-                        bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
-                        bnb_balance_display.metric(
-                            "BNB 잔고",
-                            f"{bnb_balance:.4f}",
-                            label_visibility="visible"
-                        )
-                    
-                    with col4:
-                        btc_price = st.empty()
-                        current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                        btc_price.metric(
-                            "BTC 현재가",
-                            f"{current_price:,.2f}",
-                            label_visibility="visible"
-                        )
-                    
-                    with col5:
-                        buy_price_display = st.empty()
-                    
-                    with col6:
-                        target_price_display = st.empty()
-                        sell_status_display = st.empty()
-                    
-                    # 매수 주문 실행 시
+                    # 거래 로그 테이블 컨테이너 생성
+                    st.subheader("📝 거래 로그")
+                    log_container = st.container()
+
+                    # 거래 로그를 저장할 리스트를 session_state 초기화
+                    if 'trade_logs' not in st.session_state:
+                        st.session_state.trade_logs = []
+
+                    # 거래 로그 테이블 표시
+                    log_table = st.empty()
+
+                    # 매수 주문 실행 시 로그 추가
                     buy_order = bot.client.create_order(
                         symbol='BTCUSDT',
                         side=Client.SIDE_BUY,
                         type=Client.ORDER_TYPE_MARKET,
                         quantity=quantity
                     )
-                    
+
+                    # 매수 로그 추가
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    buy_price = float(buy_order['fills'][0]['price'])
+                    st.session_state.trade_logs.append({
+                        '시간': timestamp,
+                        '유형': '매수',
+                        '가격': f"{buy_price:,.3f}",
+                        '수량': quantity,
+                        'USDT 금액': f"{float(quantity) * buy_price:,.3f}",
+                        '상태': '체결완료'
+                    })
+
                     # 매수가 저장
                     st.session_state.buy_price = float(buy_order['fills'][0]['price'])
                     buy_price_display.metric(
                         "매수가",
-                        f"{st.session_state.buy_price:,.2f} USDT"
+                        f"{st.session_state.buy_price:,.3f} USDT"
                     )
                     
-                    # 목표가 계산 및 저장 (매수가 기준)
+                    # 목표가 계산 및 저장
                     if profit_type == "절대값(USDT)":
                         st.session_state.target_price = st.session_state.buy_price + profit_target
                     else:
@@ -805,11 +927,11 @@ def main():
                     # 목표가 표시
                     target_price_display.metric(
                         "목표 매도가",
-                        f"{st.session_state.target_price:,.2f} USDT",
+                        f"{st.session_state.target_price:,.3f} USDT",
                         f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
                     )
                     
-                    # 매도 주문 설���
+                    # 매도 주문 설정
                     sell_order = bot.client.create_order(
                         symbol='BTCUSDT',
                         side=Client.SIDE_SELL,
@@ -863,7 +985,7 @@ def main():
                                     if order_status == 'FILLED':
                                         sell_status_display.success("✅ 매도 완료!")
                                         
-                                        # 1. BTC를 USDT로 변환 (0.5 BTC 유지)
+                                        # 1. BTC를 USDT로 변환 (0.5 BTC 지)
                                         try:
                                             new_balance = bot.get_account_balance()
                                             if new_balance['BTC'] > 0.5:
@@ -943,7 +1065,17 @@ def main():
                                     else:
                                         sell_status_display.warning(f"⚠️ 주문 상태: {order_status}")
                                 
-                                time.sleep(0.1)  # 1초에 10회 업데이트
+                                # 거래 로그 테이블 업데이트
+                                if st.session_state.trade_logs:
+                                    log_df = pd.DataFrame(st.session_state.trade_logs)
+                                    log_table.dataframe(
+                                        log_df,
+                                        hide_index=True,
+                                        use_container_width=True,
+                                        height=400
+                                    )
+                                
+                                time.sleep(0.1)
                                 
                         except Exception as e:
                             print(f"실시간 업데이트 중 에러: {e}")
