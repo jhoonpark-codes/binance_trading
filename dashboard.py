@@ -1,3 +1,15 @@
+import nest_asyncio
+import asyncio
+import atexit
+import signal
+import threading
+
+# Windows에서 asyncio 문제 해결
+nest_asyncio.apply()
+
+if asyncio.get_event_loop().is_closed():
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,7 +22,6 @@ import ta
 from dotenv import load_dotenv
 import time
 from main import HighFrequencyBot  # HighFrequencyBot 클래스 import 추가
-import atexit
 import sys
 
 # .env 파일 로드
@@ -24,7 +35,22 @@ class StreamlitApp:
         if 'initialized' not in st.session_state:
             st.session_state.initialized = True
             st.session_state.active_bots = set()
+            
+            # 상태 파일 초기화
+            with open('bot_status.txt', 'w') as f:
+                f.write('')
+            
+            # 상태 파일 업데이트 스레드 시작
+            self.update_thread = threading.Thread(target=self.update_status_file)
+            self.update_thread.daemon = True
+            self.update_thread.start()
+            
+            # 종료 시 정리 함수 등록
             atexit.register(self.cleanup_resources)
+            
+            # Streamlit 세션 상태에 종료 함수 등록
+            if 'on_exit' not in st.session_state:
+                st.session_state.on_exit = self.cleanup_resources
 
     def cleanup_resources(self):
         """모든 리소스 정리"""
@@ -38,23 +64,24 @@ class StreamlitApp:
                 except Exception as e:
                     print(f"Error stopping bot {id(bot)}: {e}")
             st.session_state.active_bots.clear()
-
-    def create_bot(self):
-        """봇 생성 및 관리"""
-        bot = HighFrequencyBot()
-        st.session_state.active_bots.add(bot)
-        return bot
-
-    def stop_bot(self, bot):
-        """봇 종료 및 정리"""
-        if bot in st.session_state.active_bots:
+            
+            # 상태 파일 삭제
             try:
-                bot.stop()
-                st.session_state.active_bots.remove(bot)
-                return True
+                os.remove('bot_status.txt')
+            except:
+                pass
+
+    def update_status_file(self):
+        """상태 파일 주기적 업데이트"""
+        while True:
+            try:
+                if hasattr(st.session_state, 'active_bots'):
+                    with open('bot_status.txt', 'w') as f:
+                        bot_ids = [str(id(bot)) for bot in st.session_state.active_bots]
+                        f.write(','.join(bot_ids))
             except Exception as e:
-                print(f"Error stopping bot: {e}")
-        return False
+                print(f"상태 파일 업데이트 중 에러: {e}")
+            time.sleep(10)  # 10초마다 업데이트
 
 class BinanceDashboard:
     def __init__(self):
@@ -338,7 +365,7 @@ class BinanceDashboard:
             return None
 
 def plot_candlestick(df):
-    """캔들스 차트 생성"""
+    """캔스 차트 생성"""
     fig = go.Figure(data=[go.Candlestick(
         x=df['timestamp'],
         open=df['open'],
@@ -412,7 +439,7 @@ def plot_portfolio_pie(balances_df):
 def main():
     app = StreamlitApp()
     
-    # 시작 시 세션 상태 초기화
+    # 시작 세션 상 초기화
     if 'bot' not in st.session_state:
         st.session_state.bot = None
 
@@ -590,14 +617,47 @@ def main():
                 step=1
             )
             
-            profit_target = st.number_input(
-                "목표 수익률 (%)",
-                min_value=0.01,
-                max_value=1.0,
-                value=0.01,
-                step=0.01,
-                format="%.2f"
+            # 손익 설정 방식 선택
+            profit_type = st.radio(
+                "손익 설정 방식",
+                options=["절대값(USDT)", "퍼센트(%)"],
+                horizontal=True
             )
+            
+            if profit_type == "절대값(USDT)":
+                profit_target = st.number_input(
+                    "목표 수익 (USDT)",
+                    min_value=1.0,
+                    max_value=100.0,
+                    value=5.0,
+                    step=1.0,
+                    format="%.1f"
+                )
+                stop_loss = st.number_input(
+                    "손절 기준 (USDT)",
+                    min_value=1.0,
+                    max_value=100.0,
+                    value=30.0,
+                    step=1.0,
+                    format="%.1f"
+                )
+            else:
+                profit_target = st.number_input(
+                    "목표 수익률 (%)",
+                    min_value=0.01,
+                    max_value=1.0,
+                    value=0.05,
+                    step=0.01,
+                    format="%.2f"
+                )
+                stop_loss = st.number_input(
+                    "손절 기준 (%)",
+                    min_value=0.01,
+                    max_value=1.0,
+                    value=0.1,
+                    step=0.01,
+                    format="%.2f"
+                )
 
         with col2:
             max_trades = st.number_input(
@@ -607,99 +667,191 @@ def main():
                 value=5
             )
 
-        # 스캘핑 전략 시작/중지 버튼
+            wait_time = st.number_input(
+                "최대 대기 시간 (분)",
+                min_value=1,
+                max_value=10,
+                value=3
+            )
+
+        # 설정 설명 정
+        if profit_type == "절대값(USDT)":
+            st.info(f"""
+            💡 거래 설정 가이드:
+            - USDT 사용 비율: 보유 USDT의 {use_percentage}%를 사용하여 즉시 BTC 매수
+            - 목표 수익: 매수 직후 {profit_target} USDT 상승 시점에 예약 매도 주문 설정
+            - 실시간 모니터링: 
+                • BTC 현재가 1초에 10회 업데이트
+                • 예약 매도 주문 체결 여부 1초에 10회 확인
+            - 자동 BNB 관리: BNB 잔고 부족 시 USDT의 5%로 자동 구매
+            - 거래 완료 시: 즉시 다음 매수 진행 (USDT의 {use_percentage}% 사용)
+            - 최대 대기 시간: {wait_time}분 동안 미체결 시 주문 취소 후 재시도
+            """)
+        else:
+            st.info(f"""
+            💡 거래 설정 가이드:
+            - USDT 사용 비율: 보유 USDT의 {use_percentage}%를 사용하여 즉시 BTC 매수
+            - 목표 수익률: 매수 직후 {profit_target}% 상승 시점에 예약 매도 주문 설정
+            - 실시간 모니터링: 
+                • BTC 현재가 1초에 10회 업데이트
+                • 예약 매도 주문 체결 여부 1초에 10회 확인
+            - 자동 BNB 관리: BNB 잔고 부족 시 USDT의 5%로 자동 구매
+            - 거래 완��� 시: 즉시 다음 매수 진행 (USDT의 {use_percentage}% 사용)
+            - 최대 대기 시간: {wait_time}분 동안 미체결 시 주문 취소 후 재시도
+            """)
+
+        # Start/Stop 버튼 부분
         col3, col4 = st.columns(2)
 
         with col3:
             if st.button("Start Scalping Strategy"):
                 st.warning("⚠️ 스캘핑 전략을 시작합니다.")
-                
                 try:
                     bot = HighFrequencyBot()
-                    st.session_state.scalping_bot = bot
-                    st.session_state.scalping_active = True
                     
-                    # 잔고와 BTC 가격 표시 섹션
+                    # 현재 잔고 확인
+                    initial_balance = bot.get_account_balance()
+                    if not initial_balance:
+                        st.error("잔고 조회 실패")
+                        return
+                    
+                    # UI 컴포넌트 설정
                     st.subheader("💰 현재 잔고 및 BTC 가격")
-                    balance = bot.get_account_balance()
+                    metrics_container = st.container()
+                    col1, col2, col3, col4, col5, col6 = metrics_container.columns(6)
                     
-                    if balance:
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            usdt_metric = st.metric("USDT", f"{balance['USDT']:.2f}")
-                        with col2:
-                            btc_metric = st.metric("BTC", f"{balance['BTC']:.8f}")
-                        with col3:
-                            bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
-                            bnb_metric = st.metric("BNB", f"{bnb_balance:.4f}")
-                        with col4:
-                            # BTC 가격 메트릭 추가
-                            btc_price_metric = st.empty()
-                    
-                    # 진행 상태 표시
-                    progress_text = st.empty()
-                    progress_bar = st.progress(0)
-                    
-                    # 거래 내역을 표시할 컨테이너
-                    trade_container = st.empty()
-                    
-                    # 스캘핑 전략 실행
-                    progress_count = 0
-                    last_price = 0
-                    
-                    while st.session_state.scalping_active:
-                        # 진행 상태 업데이트
-                        progress_count = (progress_count + 1) % 100
-                        progress_bar.progress(progress_count)
-                        
-                        # 현재 BTC 가격 업데이트
-                        try:
-                            current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                            price_change = current_price - last_price if last_price != 0 else 0
-                            btc_price_metric.metric(
-                                "BTC 현재가",
-                                f"{current_price:,.2f} USDT",
-                                f"{price_change:+,.2f} USDT" if last_price != 0 else None,
-                                delta_color="normal" if price_change >= 0 else "inverse"
-                            )
-                            last_price = current_price
-                        except Exception as e:
-                            print(f"가격 조회 에러: {e}")
-                        
-                        result = bot.execute_scalping_strategy(
-                            use_percentage=use_percentage,
-                            profit_target=profit_target,
-                            max_trades=max_trades
+                    # 초기 잔고 표시
+                    with col1:
+                        usdt_balance = st.empty()
+                        usdt_balance.metric(
+                            "USDT 잔고",
+                            f"{initial_balance['USDT']:.2f} USDT"
                         )
+                    
+                    with col2:
+                        btc_balance = st.empty()
+                        btc_balance.metric(
+                            "BTC 잔고",
+                            f"{initial_balance['BTC']:.8f} BTC"
+                        )
+                    
+                    with col3:
+                        bnb_balance_display = st.empty()
+                        bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
+                        bnb_balance_display.metric(
+                            "BNB 잔고",
+                            f"{bnb_balance:.4f} BNB"
+                        )
+                    
+                    with col4:
+                        btc_price = st.empty()
+                        current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                        btc_price.metric(
+                            "BTC 현재가",
+                            f"{current_price:,.2f} USDT"
+                        )
+                    
+                    # 매수가와 목표가 설정
+                    with col5:
+                        buy_price_display = st.empty()
                         
-                        if result['success']:
-                            # 거래 내역 업데이트
-                            if result.get('trades'):
-                                progress_text.empty()
-                                df_trades = pd.DataFrame(result['trades'])
-                                trade_container.dataframe(df_trades.style.format({
-                                    'buy_price': '{:.2f}',
-                                    'sell_price': '{:.2f}',
-                                    'quantity': '{:.8f}',
-                                    'profit': '{:.8f}',
-                                    'profit_percent': '{:.2f}%'
-                                }))
-                                
+                    with col6:
+                        target_price_display = st.empty()
+                        sell_status_display = st.empty()
+                    
+                    # 매수 주문 실행 시
+                    buy_order = bot.client.create_order(
+                        symbol='BTCUSDT',
+                        side=Client.SIDE_BUY,
+                        type=Client.ORDER_TYPE_MARKET,
+                        quantity=quantity
+                    )
+                    
+                    # 매수가 저장
+                    st.session_state.buy_price = float(buy_order['fills'][0]['price'])
+                    buy_price_display.metric(
+                        "매수가",
+                        f"{st.session_state.buy_price:,.2f} USDT"
+                    )
+                    
+                    # 목표가 계산 및 저장 (매수가 기준)
+                    if profit_type == "절대값(USDT)":
+                        st.session_state.target_price = st.session_state.buy_price + profit_target
+                    else:
+                        st.session_state.target_price = st.session_state.buy_price * (1 + profit_target/100)
+                    
+                    # 목표가 표시
+                    target_price_display.metric(
+                        "목표 매도가",
+                        f"{st.session_state.target_price:,.2f} USDT",
+                        f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
+                    )
+                    
+                    # 매도 주문 설정
+                    sell_order = bot.client.create_order(
+                        symbol='BTCUSDT',
+                        side=Client.SIDE_SELL,
+                        type=Client.ORDER_TYPE_LIMIT,
+                        timeInForce='GTC',
+                        quantity=quantity,
+                        price="{:.2f}".format(st.session_state.target_price)
+                    )
+                    
+                    # 매도 주문 ID 저장
+                    st.session_state.sell_order_id = sell_order['orderId']
+                    sell_status_display.info("📋 매도 주문 등록됨")
+                    
+                    # 실시간 업데이트 루프 수정
+                    while st.session_state.scalping_active:
+                        try:
+                            current_balance = bot.get_account_balance()
+                            if current_balance:
                                 # 잔고 업데이트
-                                new_balance = bot.get_account_balance()
-                                if new_balance:
-                                    col1.metric("USDT", f"{new_balance['USDT']:.2f}", 
-                                              f"{new_balance['USDT'] - balance['USDT']:.2f}")
-                                    col2.metric("BTC", f"{new_balance['BTC']:.8f}", 
-                                              f"{new_balance['BTC'] - balance['BTC']:.8f}")
-                            else:
-                                progress_text.info("💫 거래 조건 탐색 중... 거래 내역이 없습니다.")
-                        else:
-                            st.error(result['message'])
-                            break
-                        
-                        time.sleep(0.2)  # 초당 5회 업데이트
-                
+                                usdt_balance.metric(
+                                    "USDT 잔고",
+                                    f"{current_balance['USDT']:.2f} USDT",
+                                    f"{current_balance['USDT'] - initial_balance['USDT']:+.2f}"
+                                )
+                                
+                                btc_balance.metric(
+                                    "BTC 잔고",
+                                    f"{current_balance['BTC']:.8f} BTC",
+                                    f"{current_balance['BTC'] - initial_balance['BTC']:+.8f}"
+                                )
+                                
+                                # BNB 잔고 업데이트
+                                current_bnb = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
+                                bnb_balance_display.metric(
+                                    "BNB 잔고",
+                                    f"{current_bnb:.4f} BNB",
+                                    f"{current_bnb - bnb_balance:+.4f}"
+                                )
+                                
+                                # 현재가 업데이트
+                                current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                                btc_price.metric(
+                                    "BTC 현재가",
+                                    f"{current_price:,.2f} USDT",
+                                    f"{current_price - st.session_state.buy_price:+.2f}"
+                                )
+                                
+                                # 매도 주문 상태 확인
+                                if hasattr(st.session_state, 'sell_order_id'):
+                                    order_status = bot.check_order_status(st.session_state.sell_order_id)
+                                    if order_status == 'FILLED':
+                                        sell_status_display.success("✅ 매도 완료!")
+                                        # 매도 완료 후 처리...
+                                    elif order_status == 'NEW':
+                                        sell_status_display.info("📋 매도 주문 대기 중...")
+                                    else:
+                                        sell_status_display.warning(f"⚠️ 주문 상태: {order_status}")
+                                
+                            time.sleep(0.1)  # 1초에 10회 업데이트
+                            
+                        except Exception as e:
+                            print(f"실시간 업데이트 중 에러: {e}")
+                            time.sleep(0.2)
+                            
                 except Exception as e:
                     st.error(f"전략 실행 에러: {e}")
                     st.session_state.scalping_active = False
@@ -708,12 +860,42 @@ def main():
             if st.button("Stop Scalping Strategy"):
                 if hasattr(st.session_state, 'scalping_bot') and st.session_state.get('scalping_active', False):
                     try:
-                        st.session_state.scalping_bot.stop()
+                        # 먼저 실행 상태 변경
                         st.session_state.scalping_active = False
+                        
+                        # WebSocket 연결 종료
+                        if hasattr(st.session_state.scalping_bot, 'twm') and st.session_state.scalping_bot.twm:
+                            try:
+                                st.session_state.scalping_bot.twm._exit = True  # 종료 플래그 설정
+                                st.session_state.scalping_bot.twm.close()  # 연결 종료
+                                time.sleep(1)  # 종료 대기
+                            except:
+                                pass
+                            finally:
+                                st.session_state.scalping_bot.twm = None
+                        
+                        # 활성 주문 취소
+                        try:
+                            open_orders = st.session_state.scalping_bot.client.get_open_orders(symbol='BTCUSDT')
+                            for order in open_orders:
+                                st.session_state.scalping_bot.client.cancel_order(
+                                    symbol='BTCUSDT',
+                                    orderId=order['orderId']
+                                )
+                        except:
+                            pass
+                        
+                        # 봇 상태 변경 및 정리
+                        st.session_state.scalping_bot.is_running = False
                         st.session_state.scalping_bot = None
-                        st.success("스캘핑 전략이 중지되었습니다.")
+                        
+                        st.success("스캘핑 전략이 안전하게 중지되었습니다.")
+                        
                     except Exception as e:
                         st.error(f"전략 중지 중 에러 발생: {e}")
+                        # 에러가 발생해도 상태는 초기화
+                        st.session_state.scalping_active = False
+                        st.session_state.scalping_bot = None
                 else:
                     st.warning("실행 중인 스캘핑 전략이 없습니다.")
 
