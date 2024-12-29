@@ -630,39 +630,78 @@ def start_new_short_position():
 
 def monitor_orders():
     """주문 상태 모니터링"""
+    print("주문 모니터링 시작")  # 로그 추가
     while st.session_state.scalping_active:
         try:
+            current_time = datetime.now()
+            print(f"주문 상태 체크 중... {current_time}")  # 로그 추가
+            current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+
             # Long 포지션 주문 체결 확인
             if hasattr(st.session_state, 'long_order_id'):
-                long_order = st.session_state.bot.check_order_status(st.session_state.long_order_id)
-                if long_order and long_order['status'] == 'FILLED':
-                    update_position_status("LONG", "매도 주문 체결 완료!", 
-                        f"체결가: {float(long_order['price']):,.2f} USDT\n"
-                        f"수익: {(float(long_order['price']) - st.session_state.long_buy_price) * float(long_order['executedQty']):,.2f} USDT")
-                    handle_long_order_filled(long_order)
-                else:
-                    # 미체결 상태 표시
-                    elapsed_time = (datetime.now() - st.session_state.long_order_time).total_seconds()
-                    update_position_status("LONG", "목표가 매도 대기 중", 
-                        f"목표가: {st.session_state.long_target_price:,.2f} USDT\n"
-                        f"경과 시간: {elapsed_time:.1f}초")
+                print(f"Long 주문 ID: {st.session_state.long_order_id}")  # 로그 추가
+                long_order = st.session_state.bot.client.get_order(
+                    symbol='BTCUSDT',
+                    orderId=st.session_state.long_order_id
+                )
+                
+                if long_order['status'] == 'NEW':
+                    elapsed_seconds = (current_time - st.session_state.long_order_time).total_seconds()
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    elapsed_time_str = f"{minutes}분 {seconds}초"
+                    print(f"Long 경과 시간: {elapsed_time_str}")  # 로그 추가
+                    
+                    progress = ((current_price - st.session_state.long_buy_price) / 
+                              (st.session_state.long_target_price - st.session_state.long_buy_price) * 100)
+                    
+                    st.session_state.long_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>목표가 매도 대기 중</strong><br>
+                            주문 ID: {st.session_state.long_order_id}<br>
+                            매수가: {st.session_state.long_buy_price:,.2f} USDT<br>
+                            목표가: {st.session_state.long_target_price:,.2f} USDT<br>
+                            현재가: {current_price:,.2f} USDT<br>
+                            진행률: {progress:.1f}%<br>
+                            경과 시간: {elapsed_time_str}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
             # Short 포지션 주문 체결 확인
             if hasattr(st.session_state, 'short_order_id'):
-                short_order = st.session_state.bot.check_order_status(st.session_state.short_order_id)
-                if short_order and short_order['status'] == 'FILLED':
-                    update_position_status("SHORT", "매도 주문 체결 완료!", 
-                        f"체결가: {float(short_order['price']):,.2f} USDT\n"
-                        f"수익: {(st.session_state.short_sell_price - float(short_order['price'])) * float(short_order['executedQty']):,.2f} USDT")
-                    handle_short_order_filled(short_order)
-                else:
-                    # 미체결 상태 표시
-                    elapsed_time = (datetime.now() - st.session_state.short_order_time).total_seconds()
-                    update_position_status("SHORT", "목표가 매도 대기 중", 
-                        f"목표가: {st.session_state.short_target_price:,.2f} USDT\n"
-                        f"경과 시간: {elapsed_time:.1f}초")
+                short_order = st.session_state.bot.client.get_order(
+                    symbol='BTCUSDT',
+                    orderId=st.session_state.short_order_id
+                )
+                
+                if short_order['status'] == 'NEW':
+                    elapsed_seconds = (current_time - st.session_state.short_order_time).total_seconds()
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    elapsed_time_str = f"{minutes}분 {seconds}초"
+                    
+                    progress = ((current_price - st.session_state.short_sell_price) / 
+                              (st.session_state.short_sell_price - st.session_state.short_target_price) * 100)
+                    
+                    st.session_state.short_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>목표가 매수 대기 중</strong><br>
+                            주문 ID: {st.session_state.short_order_id}<br>
+                            매도가: {st.session_state.short_sell_price:,.2f} USDT<br>
+                            목표가: {st.session_state.short_target_price:,.2f} USDT<br>
+                            현재가: {current_price:,.2f} USDT<br>
+                            진행률: {progress:.1f}%<br>
+                            경과 시간: {elapsed_time_str}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-            time.sleep(0.1)  # 0.1초 대기
+            time.sleep(0.1)
 
         except Exception as e:
             print(f"주문 모니터링 중 에러: {e}")
@@ -1292,7 +1331,7 @@ def main():
                         # Long 포지션 매수 및 목표가 매도
                         status_container.info("🟢 LONG 포지션 실행 중...")
                         
-                        # Long 포지션 매수 (USDT의 5%로 BTC 매수)
+                        # Long 포지션 매수
                         long_buy_order = st.session_state.bot.client.create_order(
                             symbol='BTCUSDT',
                             side=Client.SIDE_BUY,
@@ -1300,13 +1339,66 @@ def main():
                             quantity=long_quantity
                         )
                         
+                        # Long 포지션 목표가 매도 주문 설정
+                        long_buy_price = float(long_buy_order['fills'][0]['price'])
+                        if profit_type == "절대값(USDT)":
+                            long_target_price = long_buy_price + profit_target
+                        else:
+                            long_target_price = long_buy_price * (1 + profit_target/100)
+
+                        # Long 목표가 매도 주문 등록
+                        long_sell_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_SELL,
+                            type=Client.ORDER_TYPE_LIMIT,
+                            timeInForce='GTC',
+                            quantity=long_quantity,
+                            price="{:.2f}".format(long_target_price)
+                        )
+                        st.session_state.long_order_id = long_sell_order['orderId']
+                        st.session_state.long_buy_price = long_buy_price
+                        st.session_state.long_target_price = long_target_price
+                        st.session_state.long_order_time = datetime.now()
+
+                        # Short 포지션 매도 및 목표가 매수
+                        status_container.info("🔴 SHORT 포지션 실행 중...")
+                        
+                        # Short 포지션 매도
+                        short_sell_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_SELL,
+                            type=Client.ORDER_TYPE_MARKET,
+                            quantity=short_quantity
+                        )
+                        
+                        # Short 포지션 목표가 매수 주문 설정
+                        short_sell_price = float(short_sell_order['fills'][0]['price'])
+                        if profit_type == "절대값(USDT)":
+                            short_target_price = short_sell_price - profit_target
+                        else:
+                            short_target_price = short_sell_price * (1 - profit_target/100)
+
+                        # Short 목표가 매수 주문 등록
+                        short_buy_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_BUY,
+                            type=Client.ORDER_TYPE_LIMIT,
+                            timeInForce='GTC',
+                            quantity=short_quantity,
+                            price="{:.2f}".format(short_target_price)
+                        )
+                        st.session_state.short_order_id = short_buy_order['orderId']
+                        st.session_state.short_sell_price = short_sell_price
+                        st.session_state.short_target_price = short_target_price
+                        st.session_state.short_order_time = datetime.now()
+
                         # fills 배열 확인
                         if not long_buy_order.get('fills'):
                             raise Exception("Long 매수 주문 체결 정보가 없습니다")
                             
                         long_buy_price = float(long_buy_order['fills'][0]['price'])
                         status_container.success(f"""
-                        🟢 LONG 포지션 매수 완료:
+                        🔴 LONG 포지션 매수 완료:
                         - 매수가: {long_buy_price:,.3f} USDT
                         - 수량: {long_quantity} BTC
                         - 총액: {float(long_quantity) * long_buy_price:,.3f} USDT
@@ -1569,25 +1661,119 @@ def main():
 
     with status_col1:
         st.session_state.long_status_container = st.empty()
-        st.session_state.long_status_container.markdown("""
-        <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
-            <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
-            <div style='font-size: 16px; margin-top: 5px;'>
-                대기 중...
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        try:
+            # Long 포지션 상태 확인
+            if hasattr(st.session_state, 'long_order_id'):
+                long_order = st.session_state.bot.client.get_order(
+                    symbol='BTCUSDT',
+                    orderId=st.session_state.long_order_id
+                )
+                current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                
+                if long_order['status'] == 'NEW':
+                    elapsed_seconds = (datetime.now() - st.session_state.long_order_time).total_seconds()
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    elapsed_time_str = f"{minutes}분 {seconds}초"
+                    
+                    progress = ((current_price - st.session_state.long_buy_price) / 
+                              (st.session_state.long_target_price - st.session_state.long_buy_price) * 100)
+                    
+                    st.session_state.long_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>목표가 매도 대기 중</strong><br>
+                            주문 ID: {st.session_state.long_order_id}<br>
+                            매수가: {st.session_state.long_buy_price:,.2f} USDT<br>
+                            목표가: {st.session_state.long_target_price:,.2f} USDT<br>
+                            현재가: {current_price:,.2f} USDT<br>
+                            진행률: {progress:.1f}%<br>
+                            경과 시간: {elapsed_time_str}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif long_order['status'] == 'FILLED':
+                    profit = (float(long_order['price']) - st.session_state.long_buy_price) * float(long_order['executedQty'])
+                    st.session_state.long_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>매도 주문 체결 완료!</strong><br>
+                            체결가: {float(long_order['price']):,.2f} USDT<br>
+                            수익: {profit:,.2f} USDT
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.session_state.long_status_container.markdown("""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
+                    <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
+                    <div style='font-size: 16px; margin-top: 5px;'>
+                        거래 대기 중...
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        except Exception as e:
+            print(f"Long 포지션 상태 업데이트 중 에러: {e}")
 
     with status_col2:
         st.session_state.short_status_container = st.empty()
-        st.session_state.short_status_container.markdown("""
-        <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
-            <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
-            <div style='font-size: 16px; margin-top: 5px;'>
-                대기 중...
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        try:
+            # Short 포지션 상태 확인
+            if hasattr(st.session_state, 'short_order_id'):
+                short_order = st.session_state.bot.client.get_order(
+                    symbol='BTCUSDT',
+                    orderId=st.session_state.short_order_id
+                )
+                current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                
+                if short_order['status'] == 'NEW':
+                    elapsed_seconds = (datetime.now() - st.session_state.short_order_time).total_seconds()
+                    minutes = int(elapsed_seconds // 60)
+                    seconds = int(elapsed_seconds % 60)
+                    elapsed_time_str = f"{minutes}분 {seconds}초"
+                    
+                    progress = ((current_price - st.session_state.short_sell_price) / 
+                              (st.session_state.short_sell_price - st.session_state.short_target_price) * 100)
+                    
+                    st.session_state.short_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>목표가 매수 대기 중</strong><br>
+                            주문 ID: {st.session_state.short_order_id}<br>
+                            매도가: {st.session_state.short_sell_price:,.2f} USDT<br>
+                            목표가: {st.session_state.short_target_price:,.2f} USDT<br>
+                            현재가: {current_price:,.2f} USDT<br>
+                            진행률: {progress:.1f}%<br>
+                            경과 시간: {elapsed_time_str}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                elif short_order['status'] == 'FILLED':
+                    profit = (st.session_state.short_sell_price - float(short_order['price'])) * float(short_order['executedQty'])
+                    st.session_state.short_status_container.markdown(f"""
+                    <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
+                        <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
+                        <div style='font-size: 16px; margin-top: 5px;'>
+                            <strong>매도 주문 체결 완료!</strong><br>
+                            체결가: {float(short_order['price']):,.2f} USDT<br>
+                            수익: {profit:,.2f} USDT
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.session_state.short_status_container.markdown("""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
+                    <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
+                    <div style='font-size: 16px; margin-top: 5px;'>
+                        거래 대기 중...
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        except Exception as e:
+            print(f"Short 포지션 상태 업데이트 중 에러: {e}")
 
     # 거래 로그 테이블
     log_col1, log_col2 = st.columns(2)
