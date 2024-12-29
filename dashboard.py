@@ -364,6 +364,31 @@ class BinanceDashboard:
             st.error(f"거래 실행 에러: {e}")
             return None
 
+    def stop(self):
+        """봇 종료"""
+        try:
+            # WebSocket 연결 종료
+            if hasattr(self, 'ws_manager') and self.ws_manager:
+                try:
+                    self.loop.run_until_complete(self.ws_manager.close())
+                    self.ws_manager = None
+                except Exception as e:
+                    print(f"WebSocket 종료 에러: {e}")
+
+            # 이벤트 루프 종료
+            if self.loop and not self.loop.is_closed():
+                try:
+                    pending = asyncio.all_tasks(self.loop)
+                    self.loop.run_until_complete(asyncio.gather(*pending))
+                    self.loop.close()
+                except Exception as e:
+                    print(f"이벤트 루프 종료 에러: {e}")
+
+            print("봇이 안전하게 종료되었습니다.")
+            
+        except Exception as e:
+            print(f"봇 종료 중 에러: {e}")
+
 def plot_candlestick(df):
     """캔스 차트 생성"""
     fig = go.Figure(data=[go.Candlestick(
@@ -436,16 +461,362 @@ def plot_portfolio_pie(balances_df):
     )
     return fig
 
+def update_metrics():
+    """실시간 메트릭 업데이트 함수"""
+    print("실시간 가격 모니터링 시작")
+    
+    while True:
+        if not hasattr(st.session_state, 'scalping_active') or not st.session_state.scalping_active:
+            time.sleep(0.1)
+            continue
+            
+        if not hasattr(st.session_state, 'bot'):
+            print("봇이 초기화되지 않음")
+            time.sleep(0.1)
+            continue
+            
+        try:
+            # 현재가 조회
+            current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+            
+            # 이전 가격과 비교
+            prev_price = getattr(st.session_state, 'last_price', current_price)
+            price_change = current_price - prev_price
+            price_change_percent = (price_change / prev_price) * 100 if prev_price else 0
+            
+            # 가격 변화에 따른 색상 설정
+            price_color = "green" if price_change >= 0 else "red"
+            arrow = "↑" if price_change >= 0 else "↓"
+            
+            # 기본 정보 섹션의 BTC 현재가 업데이트
+            if hasattr(st.session_state, 'btc_price_display'):
+                st.session_state.btc_price_display.markdown(f"""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd;'>
+                    <h4 style='margin: 0; color: #1E88E5;'>BTC 현재가</h4>
+                    <div style='font-size: 20px; margin-top: 5px;'>
+                        <span style='color: {price_color}; font-weight: bold;'>{current_price:,.2f} USDT</span>
+                        <br>
+                        <span style='font-size: 14px; color: {price_color};'>
+                            {arrow} {abs(price_change):+,.2f} ({price_change_percent:+.2f}%)
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 거래 로그 섹션의 현재가 모니터링 업데이트
+            if hasattr(st.session_state, 'price_monitor_container'):
+                st.session_state.price_monitor_container.markdown(f"""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin-bottom: 20px;'>
+                    <h4 style='margin: 0; color: #1E88E5;'>🔄 실시간 BTC 가격</h4>
+                    <div style='font-size: 24px; margin-top: 10px;'>
+                        <span style='color: {price_color}; font-weight: bold;'>{current_price:,.2f} USDT</span>
+                    </div>
+                    <div style='font-size: 16px; margin-top: 5px;'>
+                        <span style='color: {price_color};'>
+                            {arrow} {abs(price_change):+,.2f} USDT ({price_change_percent:+.2f}%)
+                        </span>
+                    </div>
+                    <div style='font-size: 12px; color: #666; margin-top: 5px;'>
+                        마지막 업데이트: {datetime.now().strftime('%H:%M:%S.%f')[:-4]}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # 현재가 저장
+            st.session_state.last_price = current_price
+            
+            time.sleep(0.1)  # 0.1초 대기 (1초에 10회 업데이트)
+            
+        except Exception as e:
+            print(f"현재가 업데이트 중 에러: {e}")
+            time.sleep(0.1)
+
+def start_new_long_position():
+    """새로운 Long 포지션 시작"""
+    try:
+        # 현재 시장 가격으로 매수 주문
+        current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+        
+        # USDT 잔고의 설정된 비율만큼 사용
+        current_balance = st.session_state.bot.get_account_balance()
+        trade_amount = (current_balance['USDT'] * st.session_state.use_percentage) / 100
+        quantity = (trade_amount / current_price) * 0.999  # 0.1% 여유
+        quantity = "{:.5f}".format(float(quantity))
+
+        # Long 매수 주문
+        long_buy_order = st.session_state.bot.client.create_order(
+            symbol='BTCUSDT',
+            side=Client.SIDE_BUY,
+            type=Client.ORDER_TYPE_MARKET,
+            quantity=quantity
+        )
+        
+        # 매수가 저장
+        st.session_state.long_buy_price = float(long_buy_order['fills'][0]['price'])
+        
+        # 목표가 설정
+        if st.session_state.profit_type == "절대값(USDT)":
+            st.session_state.long_target_price = st.session_state.long_buy_price + st.session_state.profit_target
+        else:
+            st.session_state.long_target_price = st.session_state.long_buy_price * (1 + st.session_state.profit_target/100)
+
+        # 매도 주문 등록
+        long_sell_order = st.session_state.bot.client.create_order(
+            symbol='BTCUSDT',
+            side=Client.SIDE_SELL,
+            type=Client.ORDER_TYPE_LIMIT,
+            timeInForce='GTC',
+            quantity=quantity,
+            price="{:.2f}".format(st.session_state.long_target_price)
+        )
+        st.session_state.long_order_id = long_sell_order['orderId']
+
+    except Exception as e:
+        print(f"새로운 Long 포지션 시작 중 에러: {e}")
+
+def start_new_short_position():
+    """새로운 Short 포지션 시작"""
+    try:
+        # session_state에서 필요한 변수들 가져오기
+        short_quantity = st.session_state.short_quantity
+        profit_type = st.session_state.profit_type
+        profit_target = st.session_state.profit_target
+        tick_size = st.session_state.tick_size
+
+        current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+        # Short 포지션 매도 주문
+        status_container.info("🔴 SHORT 포지션: 매도 주문 시작...")
+        short_sell_order = st.session_state.bot.client.create_order(
+            symbol='BTCUSDT',
+            side=Client.SIDE_SELL,
+            type=Client.ORDER_TYPE_MARKET,
+            quantity=short_quantity
+        )
+        status_container.success(f"🔴 SHORT 포지션: 매도 완료 (가격: {float(short_sell_order['fills'][0]['price']):,.3f} USDT)")
+
+        # Short 목표가 설정 및 매수 주문
+        status_container.info("🔴 SHORT 포지션: 목표가 매수 주문 등록 중...")
+
+        if profit_type == "절대값(USDT)":
+            st.session_state.short_target_price = max(
+                float(short_sell_order['fills'][0]['price']) - profit_target,  # 실제 매도가 기준
+                float(short_sell_order['fills'][0]['price']) * 0.8  # 최대 20% 하락으로 제한
+            )
+        else:
+            profit_percent = min(profit_target, 20)  # 최대 20%로 제한
+            st.session_state.short_target_price = float(short_sell_order['fills'][0]['price']) * (1 - profit_percent/100)
+
+        # 가격을 틱 사이즈에 맞게 반올림
+        formatted_short_price = "{:.8f}".format(
+            round(st.session_state.short_target_price / tick_size) * tick_size
+        )
+
+        try:
+            short_buy_order = st.session_state.bot.client.create_order(
+                symbol='BTCUSDT',
+                side=Client.SIDE_BUY,
+                type=Client.ORDER_TYPE_LIMIT,
+                timeInForce='GTC',
+                quantity=short_quantity,
+                price=formatted_short_price
+            )
+            status_container.success(f"🔴 SHORT 포지션: 목표가 매수 주문 등록 완료 (목표가: {formatted_short_price} USDT)")
+        except Exception as e:
+            st.error(f"Short 주문 에러: {e}")
+            raise e
+
+    except Exception as e:
+        print(f"새로운 Short 포지션 시작 중 에러: {e}")
+
+def monitor_orders():
+    """주문 상태 모니터링"""
+    while st.session_state.scalping_active:
+        try:
+            # Long 포지션 주문 체결 확인
+            if hasattr(st.session_state, 'long_order_id'):
+                long_order = st.session_state.bot.check_order_status(st.session_state.long_order_id)
+                if long_order and long_order['status'] == 'FILLED':
+                    update_position_status("LONG", "매도 주문 체결 완료!", 
+                        f"체결가: {float(long_order['price']):,.2f} USDT\n"
+                        f"수익: {(float(long_order['price']) - st.session_state.long_buy_price) * float(long_order['executedQty']):,.2f} USDT")
+                    handle_long_order_filled(long_order)
+                else:
+                    # 미체결 상태 표시
+                    elapsed_time = (datetime.now() - st.session_state.long_order_time).total_seconds()
+                    update_position_status("LONG", "목표가 매도 대기 중", 
+                        f"목표가: {st.session_state.long_target_price:,.2f} USDT\n"
+                        f"경과 시간: {elapsed_time:.1f}초")
+
+            # Short 포지션 주문 체결 확인
+            if hasattr(st.session_state, 'short_order_id'):
+                short_order = st.session_state.bot.check_order_status(st.session_state.short_order_id)
+                if short_order and short_order['status'] == 'FILLED':
+                    update_position_status("SHORT", "매도 주문 체결 완료!", 
+                        f"체결가: {float(short_order['price']):,.2f} USDT\n"
+                        f"수익: {(st.session_state.short_sell_price - float(short_order['price'])) * float(short_order['executedQty']):,.2f} USDT")
+                    handle_short_order_filled(short_order)
+                else:
+                    # 미체결 상태 표시
+                    elapsed_time = (datetime.now() - st.session_state.short_order_time).total_seconds()
+                    update_position_status("SHORT", "목표가 매도 대기 중", 
+                        f"목표가: {st.session_state.short_target_price:,.2f} USDT\n"
+                        f"경과 시간: {elapsed_time:.1f}초")
+
+            time.sleep(0.1)  # 0.1초 대기
+
+        except Exception as e:
+            print(f"주문 모니터링 중 에러: {e}")
+            time.sleep(0.1)
+
+def handle_long_order_filled(order):
+    """Long 포지션 주문 체결 처리"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.long_trade_logs.append({
+        '시간': timestamp,
+        '포지션': 'LONG',
+        '거래 ID': order['orderId'],
+        '유형': '매도(체결)',
+        '가격': f"{float(order['price']):,.3f}",
+        '수량': order['executedQty'],
+        'USDT 금액': f"{float(order['executedQty']) * float(order['price']):,.3f}",
+        '수수료(BNB)': '-',
+        '상태': '체결완료',
+        '목표가': f"{float(order['price']):,.3f}"
+    })
+    st.session_state.long_order_id = None
+    start_new_long_position()  # 새로운 Long 포지션 시작
+
+def handle_short_order_filled(order):
+    """Short 포지션 주문 체결 처리"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state.short_trade_logs.append({
+        '시간': timestamp,
+        '포지션': 'SHORT',
+        '거래 ID': order['orderId'],
+        '유형': '매수(체결)',
+        '가격': f"{float(order['price']):,.3f}",
+        '수량': order['executedQty'],
+        'USDT 금액': f"{float(order['executedQty']) * float(order['price']):,.3f}",
+        '수수료(BNB)': '-',
+        '상태': '체결완료',
+        '목표가': f"{float(order['price']):,.3f}"
+    })
+    st.session_state.short_order_id = None
+    start_new_short_position()  # 새로운 Short 포지션 시작
+
+def update_position_status(position_type, status, details=None):
+    """포지션 상태 업데이트"""
+    try:
+        current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+        
+        if position_type == "LONG":
+            container = st.session_state.long_status_container
+            color = "#32CD32"
+            border_color = "#90EE90"
+            emoji = "🟢"
+            target_price = getattr(st.session_state, 'long_target_price', 0)
+            entry_price = getattr(st.session_state, 'long_buy_price', 0)
+        else:
+            container = st.session_state.short_status_container
+            color = "#DC143C"
+            border_color = "#FFB6C1"
+            emoji = "🔴"
+            target_price = getattr(st.session_state, 'short_target_price', 0)
+            entry_price = getattr(st.session_state, 'short_sell_price', 0)
+
+        if entry_price and target_price:
+            price_info = f"""
+            현재가: {current_price:,.2f} USDT<br>
+            진입가: {entry_price:,.2f} USDT<br>
+            목표가: {target_price:,.2f} USDT<br>
+            진행률: {((current_price - entry_price) / (target_price - entry_price) * 100):,.1f}%
+            """
+        else:
+            price_info = "거래 대기 중..."
+
+        status_html = f"""
+        <div style='padding: 10px; border-radius: 5px; border: 1px solid {border_color}; margin-bottom: 20px;'>
+            <h4 style='margin: 0; color: {color};'>{emoji} {position_type} 포지션 상태</h4>
+            <div style='font-size: 16px; margin-top: 5px;'>
+                <strong>{status}</strong><br>
+                {price_info}<br>
+                {f'{details}' if details else ''}
+            </div>
+        </div>
+        """
+        container.markdown(status_html, unsafe_allow_html=True)
+        
+    except Exception as e:
+        print(f"포지션 상태 업데이트 중 에러: {e}")
+
 def main():
     # session_state 초기화
     if 'trade_logs' not in st.session_state:
         st.session_state.trade_logs = []
+    if 'long_trade_logs' not in st.session_state:
+        st.session_state.long_trade_logs = []
+    if 'short_trade_logs' not in st.session_state:
+        st.session_state.short_trade_logs = []
     if 'scalping_active' not in st.session_state:
         st.session_state.scalping_active = False
     if 'buy_price' not in st.session_state:
         st.session_state.buy_price = 0.0
     if 'target_price' not in st.session_state:
         st.session_state.target_price = 0.0
+    if 'current_price' not in st.session_state:
+        st.session_state.current_price = 0.0
+    if 'long_target_price' not in st.session_state:
+        st.session_state.long_target_price = 0.0
+    if 'short_target_price' not in st.session_state:
+        st.session_state.short_target_price = 0.0
+    if 'long_buy_price' not in st.session_state:
+        st.session_state.long_buy_price = 0.0
+    if 'short_sell_price' not in st.session_state:
+        st.session_state.short_sell_price = 0.0
+    if 'long_order_id' not in st.session_state:
+        st.session_state.long_order_id = None
+    if 'short_order_id' not in st.session_state:
+        st.session_state.short_order_id = None
+    if 'long_order_time' not in st.session_state:
+        st.session_state.long_order_time = None
+    if 'short_order_time' not in st.session_state:
+        st.session_state.short_order_time = None
+    
+    # 초기 잔고 초기화
+    if 'initial_balance' not in st.session_state:
+        try:
+            bot = HighFrequencyBot()
+            initial_balance = bot.get_account_balance()
+            # 현재가 조회
+            current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+            if initial_balance:
+                st.session_state.initial_balance = initial_balance
+            else:
+                st.session_state.initial_balance = {'USDT': 0.0, 'BTC': 0.0}
+        except Exception as e:
+            st.error(f"초기 잔고 조회 실패: {e}")
+            st.session_state.initial_balance = {'USDT': 0.0, 'BTC': 0.0}
+            current_price = 0.0
+    else:
+        try:
+            bot = HighFrequencyBot()
+            current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+        except Exception as e:
+            st.error(f"현재가 조회 실패: {e}")
+            current_price = 0.0
+    
+    # BNB 잔고 초기화
+    if 'initial_bnb' not in st.session_state:
+        try:
+            bot = HighFrequencyBot()
+            bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
+            st.session_state.initial_bnb = bnb_balance
+        except Exception as e:
+            st.error(f"BNB 잔고 조회 실패: {e}")
+            st.session_state.initial_bnb = 0.0
+
+    initial_balance = st.session_state.initial_balance
+    bnb_balance = st.session_state.initial_bnb
 
     st.set_page_config(page_title="Binance Dashboard", layout="wide")
     
@@ -463,28 +834,28 @@ def main():
             }
             .stMetric {
                 width: 100%;
-                min-width: 400px;
+                min-width: 250px;
             }
             .stMetric-value {
                 white-space: nowrap;
                 overflow: visible;
                 font-size: 1.1rem !important;
-                padding: 0 20px;
+                padding: 0 10px;
             }
             .stMetric-label {
                 font-size: 1rem !important;
-                padding: 0 20px;
+                padding: 0 10px;
             }
             div[data-testid="metric-container"] {
                 width: fit-content;
-                min-width: 400px;
-                margin: 0 25px;
+                min-width: 250px;
+                margin: 0 15px;
             }
             div[data-testid="column"] {
-                padding: 0 20px;
+                padding: 0 10px;
             }
             div[data-testid="stHorizontalBlock"] {
-                gap: 2rem;
+                gap: 1rem;
             }
             .dataframe {
                 font-size: 0.9rem !important;
@@ -497,7 +868,7 @@ def main():
 
     app = StreamlitApp()
     
-    # 시작 세션 상 초기화
+    # 시작 세션 상태 초기화
     if 'bot' not in st.session_state:
         st.session_state.bot = None
 
@@ -661,7 +1032,117 @@ def main():
     with tabs[6]:
         st.header("🧪 Test Trade")
         
-        # Scalping Strategy 섹션
+        # 1. 현재 잔고 및 BTC 가격 섹션
+        st.subheader("💰 현재 잔고 및 BTC 가격")
+        
+        # 기본 정보 섹션
+        st.subheader("📊 기본 정보")
+        basic_info_cols = st.columns(4)
+        st.session_state.basic_info_cols = basic_info_cols  # session_state에 저장
+        
+        # USDT 잔고
+        with basic_info_cols[0]:
+            usdt_balance = st.empty()
+            usdt_balance.metric(
+                "USDT 잔고",
+                f"{initial_balance['USDT']:,.3f}",
+                label_visibility="visible"
+            )
+
+        # BTC 잔고
+        with basic_info_cols[1]:
+            btc_balance = st.empty()
+            btc_balance.metric(
+                "BTC 잔고",
+                f"{initial_balance['BTC']:.8f}",
+                label_visibility="visible"
+            )
+
+        # BNB 잔고
+        with basic_info_cols[2]:
+            bnb_balance_display = st.empty()
+            bnb_balance_display.metric(
+                "BNB 잔고",
+                f"{bnb_balance:.4f}",
+                label_visibility="visible"
+            )
+
+        # BTC 현재가
+        with basic_info_cols[3]:
+            st.session_state.btc_price_display = st.empty()
+            try:
+                # 초기 현재가 조회
+                current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                prev_price = getattr(st.session_state, 'last_price', current_price)
+                price_change = current_price - prev_price
+                price_change_percent = (price_change / prev_price) * 100 if prev_price else 0
+                
+                # 가격 변화에 따른 색상 설정
+                price_color = "green" if price_change >= 0 else "red"
+                arrow = "↑" if price_change >= 0 else "↓"
+                
+                st.session_state.btc_price_display.markdown(f"""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd;'>
+                    <h4 style='margin: 0; color: #1E88E5;'>BTC 현재가</h4>
+                    <div style='font-size: 20px; margin-top: 5px;'>
+                        <span style='color: {price_color}; font-weight: bold;'>{current_price:,.2f} USDT</span>
+                        <br>
+                        <span style='font-size: 14px; color: {price_color};'>
+                            {arrow} {abs(price_change):+,.2f} ({price_change_percent:+.2f}%)
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 현재가 저장
+                st.session_state.last_price = current_price
+                
+            except Exception as e:
+                st.error(f"현재가 조회 실패: {e}")
+                st.session_state.btc_price_display.markdown("""
+                <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd;'>
+                    <h4 style='margin: 0; color: #1E88E5;'>BTC 현재가</h4>
+                    <div style='font-size: 20px; margin-top: 5px; color: red;'>
+                        조회 실패
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # 2. 포지션 정보 섹션
+        st.markdown("#### 📈 포지션 정보")
+        position_cols = st.columns(4)
+
+        with position_cols[0]:
+            buy_price_display = st.empty()
+            buy_price_display.metric(
+                "LONG 매수가",
+                "대기 중"
+            )
+
+        with position_cols[1]:
+            target_price_display = st.empty()
+            target_price_display.metric(
+                "LONG 목표가",
+                "대기 중"
+            )
+
+        with position_cols[2]:
+            short_price_display = st.empty()
+            short_price_display.metric(
+                "SHORT 매도가",
+                "대기 중"
+            )
+
+        with position_cols[3]:
+            short_target_display = st.empty()
+            short_target_display.metric(
+                "SHORT 목표가",
+                "대기 중"
+            )
+
+        sell_status_display = st.empty()
+
+        # 3. Scalping Strategy 섹션
         st.header("📊 Scalping Strategy")
         col1, col2 = st.columns(2)
 
@@ -674,9 +1155,14 @@ def main():
                 step=1
             )
             
+            hedging_enabled = st.checkbox(
+                "헷징 활성화 (동일 금액 Short 포지션 동시 실행)", 
+                value=True
+            )
+            
             # 손익 설정 방식 선택
             profit_type = st.radio(
-                "손익 ��정 방식",
+                "손익 설정 방식",
                 options=["절대값(USDT)", "퍼센트(%)"],
                 horizontal=True
             )
@@ -757,420 +1243,217 @@ def main():
             - 최대 대기 시간: {wait_time}분 동안 미체결 시 주문 취소 후 재시도
             """)
 
-        # Start/Stop 버튼 부분
+        # 4. Start/Stop 버튼
         col3, col4 = st.columns(2)
 
         with col3:
             if st.button("Start Scalping Strategy"):
-                # session_state 초기화
-                if 'scalping_active' not in st.session_state:
-                    st.session_state.scalping_active = False
-                if 'buy_price' not in st.session_state:
-                    st.session_state.buy_price = 0.0
-                if 'target_price' not in st.session_state:
-                    st.session_state.target_price = 0.0
-                    
-                st.warning("⚠️ 스캘핑 전략을 시작합니다.")
                 try:
-                    bot = HighFrequencyBot()
-                    st.session_state.scalping_active = True
-                    st.session_state.scalping_bot = bot
+                    # 봇 초기화
+                    st.session_state.bot = HighFrequencyBot()
+                    print("봇 초기화 완료")
+                    
+                    # 봇 연결 테스트
+                    if not st.session_state.bot.test_connection():
+                        st.error("Binance 서버 연결 실패")
+                        return
+                    print("Binance 서버 연결 성공")
                     
                     # 현재 잔고 확인
-                    initial_balance = bot.get_account_balance()
-                    if not initial_balance:
+                    current_balance = st.session_state.bot.get_account_balance()
+                    if not current_balance:
                         st.error("잔고 조회 실패")
                         return
+                    print(f"현재 잔고: {current_balance}")
+
+                    # USDT 잔고의 10%를 Long과 Short에 각각 5%씩 할당
+                    total_trade_amount = (current_balance['USDT'] * 10) / 100
+                    long_trade_amount = total_trade_amount / 2
+                    short_trade_amount = total_trade_amount / 2
+
+                    # 현재가 조회
+                    current_price = float(st.session_state.bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+                    print(f"현재가: {current_price}")
+
+                    # Long 포지션용 수량 계산
+                    long_quantity = (long_trade_amount / current_price) * 0.999  # 수수료 고려
+                    long_quantity = "{:.5f}".format(float(long_quantity))
+
+                    # Short 포지션용 수량 계산
+                    short_quantity = (short_trade_amount / current_price) * 0.999  # 수수료 고려
+                    short_quantity = "{:.5f}".format(float(short_quantity))
+
+                    st.info(f"거래 시작: Long {long_quantity} BTC, Short {short_quantity} BTC (각각 약 {long_trade_amount:.2f} USDT)")
+
+                    # 거래 상태 표시를 위한 컨테이너 생성
+                    status_container = st.empty()
                     
-                    # USDT 사용 금액 계산 (보유 USDT의 use_percentage%)
-                    trade_amount_usdt = (initial_balance['USDT'] * use_percentage) / 100
-                    
-                    # 현재 BTC 가격 확인
-                    current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                    
-                    # 매수할 BTC 수량 계산 (수수료 0.1% 고려)
-                    quantity = (trade_amount_usdt / current_price) * 0.999
-                    quantity = "{:.5f}".format(float(quantity))  # 소수점 5자리까지
-                    
-                    st.info(f"매수 예정: {quantity} BTC (약 {trade_amount_usdt:.2f} USDT)")
-                    
-                    # UI 컴포넌트 설정 - 수직 레이아웃으로 변경
-                    st.subheader("💰 현재 잔고 및 BTC 가격")
-
-                    # 스타일 수정
-                    st.markdown("""
-                        <style>
-                            .element-container {
-                                width: 100%;
-                                max-width: 600px;  # 너비 축소
-                            }
-                            .stMetric {
-                                width: 100%;
-                                min-width: 500px;  # 너비 조정
-                                margin-bottom: 10px;  # 메트릭 간 간격
-                            }
-                            .stMetric-value {
-                                white-space: nowrap;
-                                overflow: visible;
-                                font-size: 1.2rem !important;
-                                padding: 0 20px;
-                            }
-                            .stMetric-label {
-                                font-size: 1.1rem !important;
-                                padding: 0 20px;
-                            }
-                            div[data-testid="metric-container"] {
-                                width: 100%;
-                                margin: 10px 0;  # 상하 마진 추가
-                            }
-                        </style>
-                    """, unsafe_allow_html=True)
-
-                    # 메트릭 컴포넌트들을 수직으로 배치
-                    metrics_container = st.container()
-
-                    # USDT 잔고
-                    usdt_balance = metrics_container.empty()
-                    usdt_balance.metric(
-                        "USDT 잔고",
-                        f"{initial_balance['USDT']:,.3f}",
-                        label_visibility="visible"
-                    )
-
-                    # BTC 잔고
-                    btc_balance = metrics_container.empty()
-                    btc_balance.metric(
-                        "BTC 잔고",
-                        f"{initial_balance['BTC']:.8f}",
-                        label_visibility="visible"
-                    )
-
-                    # BNB 잔고
-                    bnb_balance_display = metrics_container.empty()
-                    bnb_balance = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
-                    bnb_balance_display.metric(
-                        "BNB 잔고",
-                        f"{bnb_balance:.4f}",
-                        label_visibility="visible"
-                    )
-
-                    # BTC 현재가
-                    btc_price = metrics_container.empty()
-                    current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                    btc_price.metric(
-                        "BTC 현재가",
-                        f"{current_price:,.3f}",
-                        label_visibility="visible"
-                    )
-
-                    # 매수가
-                    buy_price_display = metrics_container.empty()
-                    buy_price_display.metric(
-                        "매수가",
-                        "대기 중",
-                        label_visibility="visible"
-                    )
-
-                    # 목표 매도가
-                    target_price_display = metrics_container.empty()
-                    target_price_display.metric(
-                        "목표 매도가",
-                        "대기 중",
-                        label_visibility="visible"
-                    )
-                    sell_status_display = metrics_container.empty()
-                    
-                    # 거래 로그 테이블 컨테이너 생성
-                    st.subheader("📝 거래 로그")
-                    log_container = st.container()
-
-                    # 거래 로그를 저장할 리스트를 session_state 초기화
-                    if 'trade_logs' not in st.session_state:
-                        st.session_state.trade_logs = []
-
-                    # 거래 로그 테이블 표시
-                    log_table = st.empty()
-
-                    # 매수 주문 실행 시 로그 추가
-                    buy_order = bot.client.create_order(
-                        symbol='BTCUSDT',
-                        side=Client.SIDE_BUY,
-                        type=Client.ORDER_TYPE_MARKET,
-                        quantity=quantity
-                    )
-
-                    # 매수 로그 추가
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    buy_price = float(buy_order['fills'][0]['price'])
-                    st.session_state.trade_logs.append({
-                        '시간': timestamp,
-                        '유형': '매수',
-                        '가격': f"{buy_price:,.3f}",
-                        '수량': quantity,
-                        'USDT 금액': f"{float(quantity) * buy_price:,.3f}",
-                        '상태': '체결완료'
-                    })
-
-                    # 매수가 저장
-                    st.session_state.buy_price = float(buy_order['fills'][0]['price'])
-                    buy_price_display.metric(
-                        "매수가",
-                        f"{st.session_state.buy_price:,.3f} USDT"
-                    )
-                    
-                    # 목표가 계산 및 저장
-                    if profit_type == "절대값(USDT)":
-                        st.session_state.target_price = st.session_state.buy_price + profit_target
-                    else:
-                        st.session_state.target_price = st.session_state.buy_price * (1 + profit_target/100)
-                    
-                    # 목표가 표시
-                    target_price_display.metric(
-                        "목표 매도가",
-                        f"{st.session_state.target_price:,.3f} USDT",
-                        f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
-                    )
-                    
-                    # 매도 주문 설정
-                    sell_order = bot.client.create_order(
-                        symbol='BTCUSDT',
-                        side=Client.SIDE_SELL,
-                        type=Client.ORDER_TYPE_LIMIT,
-                        timeInForce='GTC',
-                        quantity=quantity,
-                        price="{:.2f}".format(st.session_state.target_price)
-                    )
-                    
-                    # 매도 주문 ID 저장
-                    st.session_state.sell_order_id = sell_order['orderId']
-                    sell_status_display.info("📋 매도 주문 등록됨")
-                    
-                    # 실시간 업데이트 루프 수정
-                    while st.session_state.scalping_active:
-                        try:
-                            current_balance = bot.get_account_balance()
-                            if current_balance:
-                                # 잔고 업데이트
-                                usdt_balance.metric(
-                                    "USDT 잔고",
-                                    f"{current_balance['USDT']:.2f} USDT",
-                                    f"{current_balance['USDT'] - initial_balance['USDT']:+.2f}"
-                                )
-                                
-                                btc_balance.metric(
-                                    "BTC 잔고",
-                                    f"{current_balance['BTC']:.8f} BTC",
-                                    f"{current_balance['BTC'] - initial_balance['BTC']:+.8f}"
-                                )
-                                
-                                # BNB 잔고 업데이트
-                                current_bnb = float([asset for asset in bot.client.get_account()['balances'] if asset['asset'] == 'BNB'][0]['free'])
-                                bnb_balance_display.metric(
-                                    "BNB 잔고",
-                                    f"{current_bnb:.4f} BNB",
-                                    f"{current_bnb - bnb_balance:+.4f}"
-                                )
-                                
-                                # 현재가 업데이트
-                                current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                                btc_price.metric(
-                                    "BTC 현재가",
-                                    f"{current_price:,.2f} USDT",
-                                    f"{current_price - st.session_state.buy_price:+.2f}"
-                                )
-                                
-                                # 매도 주문 상태 확인
-                                if hasattr(st.session_state, 'sell_order_id'):
-                                    try:
-                                        order_status = bot.check_order_status(st.session_state.sell_order_id)
-                                        if order_status == 'FILLED':
-                                            # 매도 완료 로그 추가
-                                            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                            st.session_state.trade_logs.append({
-                                                '시간': timestamp,
-                                                '유형': '매도',
-                                                '가격': f"{st.session_state.target_price:,.3f}",
-                                                '수량': quantity,
-                                                'USDT 금액': f"{float(quantity) * st.session_state.target_price:,.3f}",
-                                                '상태': '체결완료'
-                                            })
-                                            sell_status_display.success("✅ 매도 완료!")
-                                            
-                                            # 1. BTC를 USDT로 변환 (0.5 BTC 지)
-                                            try:
-                                                new_balance = bot.get_account_balance()
-                                                if new_balance['BTC'] > 0.5:
-                                                    excess_btc = new_balance['BTC'] - 0.5
-                                                    if excess_btc > 0:
-                                                        convert_order = bot.client.create_order(
-                                                            symbol='BTCUSDT',
-                                                            side=Client.SIDE_SELL,
-                                                            type=Client.ORDER_TYPE_MARKET,
-                                                            quantity="{:.5f}".format(excess_btc)
-                                                        )
-                                                        st.info(f"BTC -> USDT 변환 완료: {excess_btc:.8f} BTC")
-                                                        time.sleep(1)  # 잔고 업데이트 대기
-                                            except Exception as e:
-                                                st.error(f"BTC 변환 실패: {e}")
-                                            
-                                            # 2. 새로운 매수-매도 주문 설정
-                                            try:
-                                                # 최신 잔고 확인
-                                                updated_balance = bot.get_account_balance()
-                                                trade_amount_usdt = (updated_balance['USDT'] * use_percentage) / 100
-                                                
-                                                # 현재 BTC 가격 확인
-                                                current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
-                                                
-                                                # 새로운 매수 수량 계산
-                                                new_quantity = (trade_amount_usdt / current_price) * 0.999
-                                                new_quantity = "{:.5f}".format(float(new_quantity))
-                                                
-                                                # 매수 주문
-                                                buy_order = bot.client.create_order(
-                                                    symbol='BTCUSDT',
-                                                    side=Client.SIDE_BUY,
-                                                    type=Client.ORDER_TYPE_MARKET,
-                                                    quantity=new_quantity
-                                                )
-                                                
-                                                # 매수가 업데이트
-                                                st.session_state.buy_price = float(buy_order['fills'][0]['price'])
-                                                buy_price_display.metric(
-                                                    "매수가",
-                                                    f"{st.session_state.buy_price:,.2f} USDT"
-                                                )
-                                                
-                                                # 새로운 목표가 계산
-                                                if profit_type == "절대값(USDT)":
-                                                    st.session_state.target_price = st.session_state.buy_price + profit_target
-                                                else:
-                                                    st.session_state.target_price = st.session_state.buy_price * (1 + profit_target/100)
-                                                
-                                                # 목표가 표시 업데이트
-                                                target_price_display.metric(
-                                                    "목표 매도가",
-                                                    f"{st.session_state.target_price:,.2f} USDT",
-                                                    f"+{profit_target} {'USDT' if profit_type == '절대값(USDT)' else '%'}"
-                                                )
-                                                
-                                                # 새로운 매도 주문
-                                                sell_order = bot.client.create_order(
-                                                    symbol='BTCUSDT',
-                                                    side=Client.SIDE_SELL,
-                                                    type=Client.ORDER_TYPE_LIMIT,
-                                                    timeInForce='GTC',
-                                                    quantity=new_quantity,
-                                                    price="{:.2f}".format(st.session_state.target_price)
-                                                )
-                                                
-                                                # 새로운 매도 주문 ID 저장
-                                                st.session_state.sell_order_id = sell_order['orderId']
-                                                sell_status_display.info("📋 새로운 매도 주문 등록됨")
-                                                
-                                                # 새로운 매수 주문 시 로그 추가
-                                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                                st.session_state.trade_logs.append({
-                                                    '시간': timestamp,
-                                                    '유형': '매수',
-                                                    '가격': f"{st.session_state.buy_price:,.3f}",
-                                                    '수량': new_quantity,
-                                                    'USDT 금액': f"{float(new_quantity) * st.session_state.buy_price:,.3f}",
-                                                    '상태': '체결완료'
-                                                })
-                                                
-                                                # 새로운 매도 주문 등록 시 로그 추가
-                                                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                                                st.session_state.trade_logs.append({
-                                                    '시간': timestamp,
-                                                    '유형': '매도 예약',
-                                                    '가격': f"{st.session_state.target_price:,.3f}",
-                                                    '수량': new_quantity,
-                                                    'USDT 금액': f"{float(new_quantity) * st.session_state.target_price:,.3f}",
-                                                    '상태': '주문 등록'
-                                                })
-                                                
-                                            except Exception as e:
-                                                st.error(f"새로운 주문 설정 실패: {e}")
-                                                
-                                        elif order_status == 'NEW':
-                                            sell_status_display.info("📋 매도 주문 대기 중...")
-                                        elif order_status is None:
-                                            # 주문이 없는 경우 (이미 취소되었거나 완료된 경우)
-                                            st.session_state.sell_order_id = None
-                                        else:
-                                            sell_status_display.warning(f"⚠️ 주문 상태: {order_status}")
-                                        
-                                    except Exception as e:
-                                        if "Order does not exist" in str(e):
-                                            # 주문이 없는 경우 처리
-                                            st.session_state.sell_order_id = None
-                                            sell_status_display.info("주문 정보 초기화됨")
-                                        else:
-                                            print(f"주문 상태 확인 중 에러: {e}")
-                                
-                                # 거래 로그 테이블 업데이트
-                                if st.session_state.trade_logs:
-                                    log_df = pd.DataFrame(st.session_state.trade_logs)
-                                    log_table.dataframe(
-                                        log_df,
-                                        hide_index=True,
-                                        use_container_width=True,
-                                        height=400
-                                    )
-                                
-                                time.sleep(0.1)
-                                
-                        except Exception as e:
-                            print(f"실시간 업데이트 중 에러: {e}")
-                            time.sleep(0.2)
+                    try:
+                        # Long 포지션 매수 및 목표가 매도
+                        status_container.info("🟢 LONG 포지션 실행 중...")
+                        
+                        # Long 포지션 매수 (USDT의 5%로 BTC 매수)
+                        long_buy_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_BUY,
+                            type=Client.ORDER_TYPE_MARKET,
+                            quantity=long_quantity
+                        )
+                        
+                        # fills 배열 확인
+                        if not long_buy_order.get('fills'):
+                            raise Exception("Long 매수 주문 체결 정보가 없습니다")
                             
+                        long_buy_price = float(long_buy_order['fills'][0]['price'])
+                        status_container.success(f"""
+                        🟢 LONG 포지션 매수 완료:
+                        - 매수가: {long_buy_price:,.3f} USDT
+                        - 수량: {long_quantity} BTC
+                        - 총액: {float(long_quantity) * long_buy_price:,.3f} USDT
+                        - 수수료(BNB): {float(long_buy_order['fills'][0].get('commission', 0)):,.8f}
+                        """)
+
+                        # Long 포지션 목표가 매도 주문
+                        status_container.info("🟢 LONG 포지션: 목표가 매도 주문 등록 중...")
+                        if profit_type == "절대값(USDT)":
+                            long_target_price = long_buy_price + profit_target
+                        else:
+                            long_target_price = long_buy_price * (1 + profit_target/100)
+
+                        long_sell_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_SELL,
+                            type=Client.ORDER_TYPE_LIMIT,
+                            timeInForce='GTC',
+                            quantity=long_quantity,
+                            price="{:.2f}".format(long_target_price)
+                        )
+                        # 주문 시간 기록
+                        st.session_state.long_order_time = datetime.now()
+                        st.session_state.long_order_id = long_sell_order['orderId']
+                        status_container.success(f"""
+                        🟢 LONG 포지션 목표가 매도 주문 등록 완료:
+                        - 매수가: {long_buy_price:,.3f} USDT
+                        - 목표가: {long_target_price:,.2f} USDT
+                        - 예상 수익: {(long_target_price - long_buy_price) * float(long_quantity):,.3f} USDT
+                        - 예상 수익률: {((long_target_price - long_buy_price) / long_buy_price * 100):,.2f}%
+                        """)
+
+                        # Short 포지션 매수 및 목표가 매도 (독립적으로 실행)
+                        status_container.info("🔴 SHORT 포지션 실행 중...")
+                        
+                        # Short 포지션 매수 (USDT의 5%로 BTC 매수)
+                        short_buy_order = st.session_state.bot.client.create_order(
+                            symbol='BTCUSDT',
+                            side=Client.SIDE_BUY,
+                            type=Client.ORDER_TYPE_MARKET,
+                            quantity=short_quantity
+                        )
+                        
+                        # fills 배열 확인
+                        if not short_buy_order.get('fills'):
+                            raise Exception("Short 매수 주문 체결 정보가 없습니다")
+                            
+                        short_buy_price = float(short_buy_order['fills'][0]['price'])
+                        status_container.success(f"""
+                        🔴 SHORT 포지션 매수 완료:
+                        - 매수가: {short_buy_price:,.3f} USDT
+                        - 수량: {short_quantity} BTC
+                        - 총액: {float(short_quantity) * short_buy_price:,.3f} USDT
+                        """)
+
+                        # 거래 로그 업데이트
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        # Long 매수 로그
+                        commission = float(long_buy_order['fills'][0].get('commission', 0)) if long_buy_order.get('fills') else 0
+                        st.session_state.long_trade_logs.append({
+                            '시간': timestamp,
+                            '포지션': 'LONG',
+                            '거래 ID': long_buy_order['orderId'],
+                            '유형': '매수',
+                            '가격': f"{long_buy_price:,.3f}",
+                            '수량': long_quantity,
+                            'USDT 금액': f"{float(long_quantity) * long_buy_price:,.3f}",
+                            '수수료(BNB)': f"{commission:.8f}",
+                            '상태': '체결완료'
+                        })
+
+                        # Short 매수 로그
+                        commission = float(short_buy_order['fills'][0].get('commission', 0)) if short_buy_order.get('fills') else 0
+                        st.session_state.short_trade_logs.append({
+                            '시간': timestamp,
+                            '포지션': 'SHORT',
+                            '거래 ID': short_buy_order['orderId'],
+                            '유형': '매수',
+                            '가격': f"{short_buy_price:,.3f}",
+                            '수량': short_quantity,
+                            'USDT 금액': f"{float(short_quantity) * short_buy_price:,.3f}",
+                            '수수료(BNB)': f"{commission:.8f}",
+                            '상태': '체결완료'
+                        })
+
+                        # 메트릭 업데이트 스레드 시작
+                        st.session_state.scalping_active = True
+                        update_thread = threading.Thread(target=update_metrics)
+                        update_thread.daemon = True
+                        update_thread.start()
+                        print("메트릭 업데이트 스레드 시작됨")
+
+                        # 주문 모니터링 스레드 시작
+                        monitor_thread = threading.Thread(target=monitor_orders)
+                        monitor_thread.daemon = True
+                        monitor_thread.start()
+                        print("주문 모니터링 스레드 시작됨")
+
+                    except Exception as e:
+                        st.error(f"주문 실행 중 에러: {e}")
+                        print(f"주문 실행 중 에러: {e}")
+
                 except Exception as e:
                     st.error(f"전략 실행 에러: {e}")
-                    st.session_state.scalping_active = False
+                    print(f"전략 실행 에러: {e}")
 
-        with col4:
-            if st.button("Stop Scalping Strategy"):
-                if hasattr(st.session_state, 'scalping_bot') and st.session_state.get('scalping_active', False):
+        # Stop 버튼 클릭 시
+        if st.button("Stop Scalping Strategy"):
+            try:
+                # 활성 상태 먼저 변경
+                st.session_state.scalping_active = False
+                
+                # 활성화된 주문 취소
+                if hasattr(st.session_state, 'bot') and st.session_state.bot:
                     try:
-                        # 먼저 실행 상태 변경
-                        st.session_state.scalping_active = False
+                        # Long 포지션 주문 취소
+                        if hasattr(st.session_state, 'long_order_id') and st.session_state.long_order_id:
+                            st.session_state.bot.client.cancel_order(
+                                symbol='BTCUSDT',
+                                orderId=st.session_state.long_order_id
+                            )
+                            st.session_state.long_order_id = None
                         
-                        # WebSocket 연결 종료
-                        if hasattr(st.session_state.scalping_bot, 'twm') and st.session_state.scalping_bot.twm:
-                            try:
-                                st.session_state.scalping_bot.twm._exit = True  # 종료 플래그 설정
-                                st.session_state.scalping_bot.twm.close()  # 연결 종료
-                                time.sleep(1)  # 종료 대기
-                            except:
-                                pass
-                            finally:
-                                st.session_state.scalping_bot.twm = None
+                        # Short 포지션 주문 취소
+                        if hasattr(st.session_state, 'short_order_id') and st.session_state.short_order_id:
+                            st.session_state.bot.client.cancel_order(
+                                symbol='BTCUSDT',
+                                orderId=st.session_state.short_order_id
+                            )
+                            st.session_state.short_order_id = None
                         
-                        # 활성 주문 취소
-                        try:
-                            open_orders = st.session_state.scalping_bot.client.get_open_orders(symbol='BTCUSDT')
-                            for order in open_orders:
-                                st.session_state.scalping_bot.client.cancel_order(
-                                    symbol='BTCUSDT',
-                                    orderId=order['orderId']
-                                )
-                        except:
-                            pass
-                        
-                        # 봇 상태 변경 및 정리
-                        st.session_state.scalping_bot.is_running = False
-                        st.session_state.scalping_bot = None
+                        # 봇 종료
+                        st.session_state.bot.stop()
+                        st.session_state.bot = None
                         
                         st.success("스캘핑 전략이 안전하게 중지되었습니다.")
                         
                     except Exception as e:
-                        st.error(f"전략 중지 중 에러 발생: {e}")
-                        # 에러 발생해도 상태는 초기화
-                        st.session_state.scalping_active = False
-                        st.session_state.scalping_bot = None
+                        print(f"주문 취소 중 에러: {e}")
+                        st.warning("일부 주문 취소가 실패했을 수 있습니다.")
                 else:
-                    st.warning("실행 중인 스캘핑 전략이 없습니다.")
+                    st.info("실행 중인 봇이 없습니다.")
+                
+            except Exception as e:
+                print(f"전략 중지 중 에러: {e}")
+                st.error("전략 중지 중 에러가 발생했습니다. 새로고침 후 다시 시도해주세요.")
 
     # Technical Analysis 탭
     with tabs[3]:
@@ -1191,7 +1474,6 @@ def main():
             
             with col2:
                 st.subheader("Trading Signals")
-                # 간단한 트레이딩 신
                 if rsi > 70:
                     st.warning("💢 Overbought - Consider Selling")
                 elif rsi < 30:
@@ -1233,6 +1515,108 @@ def main():
     # 수동 새로고침 버튼
     if st.button("새로고침"):
         st.rerun()
+
+    # 5. 거래 로그 섹션
+    st.subheader("📝 거래 로그")
+    
+    # BTC 현재가 모니터링 컨테이너
+    st.session_state.price_monitor_container = st.empty()
+
+    try:
+        # 초기 현재가 조회
+        current_price = float(bot.client.get_symbol_ticker(symbol='BTCUSDT')['price'])
+        prev_price = getattr(st.session_state, 'last_price', current_price)
+        price_change = current_price - prev_price
+        price_change_percent = (price_change / prev_price) * 100 if prev_price else 0
+        
+        # 가격 변화에 따른 색상 설정
+        price_color = "green" if price_change >= 0 else "red"
+        arrow = "↑" if price_change >= 0 else "↓"
+        
+        st.session_state.price_monitor_container.markdown(f"""
+        <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin-bottom: 20px;'>
+            <h4 style='margin: 0; color: #1E88E5;'>🔄 실시간 BTC 가격</h4>
+            <div style='font-size: 24px; margin-top: 10px;'>
+                <span style='color: {price_color}; font-weight: bold;'>{current_price:,.2f} USDT</span>
+            </div>
+            <div style='font-size: 16px; margin-top: 5px;'>
+                <span style='color: {price_color};'>
+                    {arrow} {abs(price_change):+,.2f} USDT ({price_change_percent:+.2f}%)
+                </span>
+            </div>
+            <div style='font-size: 12px; color: #666; margin-top: 5px;'>
+                마지막 업데이트: {datetime.now().strftime('%H:%M:%S.%f')[:-4]}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 현재가 저장
+        st.session_state.last_price = current_price
+        
+    except Exception as e:
+        st.error(f"현재가 조회 실패: {e}")
+        st.session_state.price_monitor_container.markdown("""
+        <div style='padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin-bottom: 20px;'>
+            <h4 style='margin: 0; color: #1E88E5;'>🔄 실시간 BTC 가격</h4>
+            <div style='font-size: 20px; margin-top: 5px; color: red;'>
+                조회 실패
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 포지션 상태 모니터링 컨테이너 추가
+    status_col1, status_col2 = st.columns(2)
+
+    with status_col1:
+        st.session_state.long_status_container = st.empty()
+        st.session_state.long_status_container.markdown("""
+        <div style='padding: 10px; border-radius: 5px; border: 1px solid #90EE90; margin-bottom: 20px;'>
+            <h4 style='margin: 0; color: #32CD32;'>🟢 LONG 포지션 상태</h4>
+            <div style='font-size: 16px; margin-top: 5px;'>
+                대기 중...
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with status_col2:
+        st.session_state.short_status_container = st.empty()
+        st.session_state.short_status_container.markdown("""
+        <div style='padding: 10px; border-radius: 5px; border: 1px solid #FFB6C1; margin-bottom: 20px;'>
+            <h4 style='margin: 0; color: #DC143C;'>🔴 SHORT 포지션 상태</h4>
+            <div style='font-size: 16px; margin-top: 5px;'>
+                대기 중...
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 거래 로그 테이블
+    log_col1, log_col2 = st.columns(2)
+
+    # 롱 포지션 로그
+    with log_col1:
+        st.markdown("### 🟢 Long Position Logs")
+        long_log_table = st.empty()
+        if st.session_state.long_trade_logs:
+            long_df = pd.DataFrame(st.session_state.long_trade_logs)
+            long_log_table.dataframe(
+                long_df,
+                hide_index=True,
+                use_container_width=True,
+                height=400
+            )
+
+    # 숏 포지션 로그
+    with log_col2:
+        st.markdown("### 🔴 Short Position Logs")
+        short_log_table = st.empty()
+        if st.session_state.short_trade_logs:
+            short_df = pd.DataFrame(st.session_state.short_trade_logs)
+            short_log_table.dataframe(
+                short_df,
+                hide_index=True,
+                use_container_width=True,
+                height=400
+            )
 
 if __name__ == "__main__":
     main() 
